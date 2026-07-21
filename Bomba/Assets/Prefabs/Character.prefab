@@ -156,6 +156,7 @@ Transform:
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 3865188219070456243}
+  - {fileID: 7000000000000000102}
   - {fileID: 7926003651330743764}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
@@ -219,6 +220,11 @@ MonoBehaviour:
   cameraModeTransitionSpeed: 10
   thirdPersonCollisionRadius: 0.2
   cameraCollisionPadding: 0.1
+  characterModelRoot: {fileID: -8679921383154817045, guid: 058ae78ce3eefdb418d2d33242a33d3c, type: 3}
+  characterAnimator: {fileID: 0}
+  showModelInFirstPerson: 1
+  hidePlaceholderCapsuleWhenModelAssigned: 1
+  animationDampTime: 0.1
   cameraPivot: {fileID: 7926003651330743764}
   cameraTransform: {fileID: 5273373302832629720}
   capsuleVisual: {fileID: 3865188219070456243}
@@ -312,3 +318,34 @@ MeshRenderer:
   m_SortingOrder: 0
   m_MaskInteraction: 0
   m_AdditionalVertexStreams: {fileID: 0}
+--- !u!1 &7000000000000000101
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 7000000000000000102}
+  m_Layer: 0
+  m_Name: CharacterModelRoot
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &7000000000000000102
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7000000000000000101}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 1662394515814189820}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}

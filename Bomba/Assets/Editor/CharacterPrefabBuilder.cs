@@ -51,6 +51,9 @@ public static class CharacterPrefabBuilder
             UnityEngine.Object.DestroyImmediate(capsule.GetComponent<CapsuleCollider>());
             capsule.GetComponent<MeshRenderer>().sharedMaterial = material;
 
+            GameObject modelRoot = new GameObject("CharacterModelRoot");
+            modelRoot.transform.SetParent(root.transform, false);
+
             GameObject cameraPivot = new GameObject("CameraPivot");
             cameraPivot.transform.SetParent(root.transform, false);
             cameraPivot.transform.localPosition = new Vector3(0f, 1.65f, 0f);
@@ -171,6 +174,11 @@ public static class CharacterPrefabBuilder
             !Mathf.Approximately(prefabCamera.transform.parent.localPosition.y, 1.65f))
         {
             throw new InvalidOperationException("Character eye-level camera validation failed.");
+        }
+
+        if (prefab.transform.Find("CharacterModelRoot") == null)
+        {
+            throw new InvalidOperationException("Character model root validation failed.");
         }
 
     }
