@@ -38,6 +38,15 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     [SerializeField, Min(0f)] private float thirdPersonCollisionRadius = 0.2f;
     [SerializeField, Min(0f)] private float cameraCollisionPadding = 0.1f;
 
+    [Header("Animation")]
+    [Tooltip("Place the imported character prefab under this transform.")]
+    [SerializeField] private Transform characterModelRoot;
+    [Tooltip("Optional. If left empty, the first Animator under CharacterModelRoot is used.")]
+    [SerializeField] private Animator characterAnimator;
+    [SerializeField] private bool showModelInFirstPerson = true;
+    [SerializeField] private bool hidePlaceholderCapsuleWhenModelAssigned = true;
+    [SerializeField, Min(0f)] private float animationDampTime = 0.1f;
+
     [Header("References")]
     [SerializeField] private Transform cameraPivot;
     [SerializeField] private Transform cameraTransform;
@@ -46,6 +55,16 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private readonly Collider[] headroomHits = new Collider[16];
     private readonly RaycastHit[] cameraCollisionHits = new RaycastHit[16];
 
+    private static readonly int SpeedParameter = Animator.StringToHash("Speed");
+    private static readonly int MoveXParameter = Animator.StringToHash("MoveX");
+    private static readonly int MoveYParameter = Animator.StringToHash("MoveY");
+    private static readonly int VerticalSpeedParameter = Animator.StringToHash("VerticalSpeed");
+    private static readonly int GroundedParameter = Animator.StringToHash("IsGrounded");
+    private static readonly int CrouchingParameter = Animator.StringToHash("IsCrouching");
+    private static readonly int SprintingParameter = Animator.StringToHash("IsSprinting");
+    private static readonly int ThirdPersonParameter = Animator.StringToHash("IsThirdPerson");
+    private static readonly int JumpParameter = Animator.StringToHash("Jump");
+
     private CharacterController characterController;
     private InputAction moveAction;
     private InputAction lookAction;
@@ -53,6 +72,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private InputAction crouchAction;
     private InputAction sprintAction;
     private InputAction cameraModeAction;
+    private Renderer[] modelRenderers = System.Array.Empty<Renderer>();
+    private bool[] modelRendererDefaultStates = System.Array.Empty<bool>();
+    private RuntimeAnimatorController cachedAnimatorController;
     private Vector3 cameraNeutralLocalPosition;
     private Vector3 currentBobOffset;
     private float verticalVelocity;
@@ -62,6 +84,17 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private bool isCrouching;
     private bool isSprinting;
     private bool isThirdPerson;
+    private bool modelVisibilityInitialized;
+    private bool modelIsVisible;
+    private bool hasSpeedParameter;
+    private bool hasMoveXParameter;
+    private bool hasMoveYParameter;
+    private bool hasVerticalSpeedParameter;
+    private bool hasGroundedParameter;
+    private bool hasCrouchingParameter;
+    private bool hasSprintingParameter;
+    private bool hasThirdPersonParameter;
+    private bool hasJumpParameter;
 
     public bool IsCrouching => isCrouching;
     public bool IsThirdPerson => isThirdPerson;
@@ -86,6 +119,8 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
             Camera childCamera = cameraPivot.GetComponentInChildren<Camera>(true);
             cameraTransform = childCamera != null ? childCamera.transform : null;
         }
+
+        ConfigureAnimationModel();
 
         if (cameraPivot != null)
         {
@@ -121,6 +156,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         UpdateMovement();
         UpdateHeadBob();
         UpdateCameraModePosition();
+        UpdateAnimation();
     }
 
     private void OnDisable()
@@ -196,6 +232,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         if (isGrounded && jumpAction.WasPressedThisFrame())
         {
             verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
+            TriggerJumpAnimation();
         }
 
         Vector2 input = moveAction.ReadValue<Vector2>();
@@ -357,6 +394,185 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         }
 
         return localDirection * availableDistance;
+    }
+
+    private void ConfigureAnimationModel()
+    {
+        if (characterModelRoot == null)
+        {
+            characterModelRoot = transform.Find("CharacterModelRoot");
+        }
+
+        if (characterAnimator == null && characterModelRoot != null)
+        {
+            characterAnimator = characterModelRoot.GetComponentInChildren<Animator>(true);
+        }
+
+        if (characterModelRoot != null)
+        {
+            modelRenderers = characterModelRoot.GetComponentsInChildren<Renderer>(true);
+            modelRendererDefaultStates = new bool[modelRenderers.Length];
+            for (int i = 0; i < modelRenderers.Length; i++)
+            {
+                modelRendererDefaultStates[i] = modelRenderers[i].enabled;
+            }
+        }
+
+        bool hasModelVisual = modelRenderers.Length > 0;
+        if (capsuleVisual != null && hidePlaceholderCapsuleWhenModelAssigned && hasModelVisual)
+        {
+            capsuleVisual.gameObject.SetActive(false);
+        }
+
+        if (characterAnimator != null)
+        {
+            characterAnimator.applyRootMotion = false;
+            characterAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+        }
+
+        CacheAnimatorParameters();
+        UpdateModelVisibility(true);
+    }
+
+    private void UpdateAnimation()
+    {
+        UpdateModelVisibility(false);
+
+        if (characterAnimator == null)
+        {
+            return;
+        }
+
+        if (cachedAnimatorController != characterAnimator.runtimeAnimatorController)
+        {
+            CacheAnimatorParameters();
+        }
+
+        Vector3 localVelocity = transform.InverseTransformDirection(characterController.velocity);
+        float planarSpeed = new Vector2(localVelocity.x, localVelocity.z).magnitude;
+        float maximumSpeed = Mathf.Max(sprintSpeed, 0.01f);
+        Vector2 normalizedMovement = moveAction.ReadValue<Vector2>();
+        if (normalizedMovement.sqrMagnitude > 1f)
+        {
+            normalizedMovement.Normalize();
+        }
+
+        if (hasSpeedParameter)
+        {
+            characterAnimator.SetFloat(
+                SpeedParameter,
+                Mathf.Clamp01(planarSpeed / maximumSpeed),
+                animationDampTime,
+                Time.deltaTime);
+        }
+
+        if (hasMoveXParameter)
+        {
+            characterAnimator.SetFloat(MoveXParameter, normalizedMovement.x, animationDampTime, Time.deltaTime);
+        }
+
+        if (hasMoveYParameter)
+        {
+            characterAnimator.SetFloat(MoveYParameter, normalizedMovement.y, animationDampTime, Time.deltaTime);
+        }
+
+        if (hasVerticalSpeedParameter)
+        {
+            characterAnimator.SetFloat(
+                VerticalSpeedParameter,
+                characterController.velocity.y,
+                animationDampTime,
+                Time.deltaTime);
+        }
+
+        if (hasGroundedParameter)
+        {
+            characterAnimator.SetBool(GroundedParameter, characterController.isGrounded);
+        }
+
+        if (hasCrouchingParameter)
+        {
+            characterAnimator.SetBool(CrouchingParameter, isCrouching);
+        }
+
+        if (hasSprintingParameter)
+        {
+            characterAnimator.SetBool(SprintingParameter, isSprinting && planarSpeed > 0.1f);
+        }
+
+        if (hasThirdPersonParameter)
+        {
+            characterAnimator.SetBool(ThirdPersonParameter, isThirdPerson);
+        }
+    }
+
+    private void CacheAnimatorParameters()
+    {
+        hasSpeedParameter = false;
+        hasMoveXParameter = false;
+        hasMoveYParameter = false;
+        hasVerticalSpeedParameter = false;
+        hasGroundedParameter = false;
+        hasCrouchingParameter = false;
+        hasSprintingParameter = false;
+        hasThirdPersonParameter = false;
+        hasJumpParameter = false;
+
+        if (characterAnimator == null)
+        {
+            cachedAnimatorController = null;
+            return;
+        }
+
+        cachedAnimatorController = characterAnimator.runtimeAnimatorController;
+        foreach (AnimatorControllerParameter parameter in characterAnimator.parameters)
+        {
+            int hash = parameter.nameHash;
+            AnimatorControllerParameterType type = parameter.type;
+            hasSpeedParameter |= hash == SpeedParameter && type == AnimatorControllerParameterType.Float;
+            hasMoveXParameter |= hash == MoveXParameter && type == AnimatorControllerParameterType.Float;
+            hasMoveYParameter |= hash == MoveYParameter && type == AnimatorControllerParameterType.Float;
+            hasVerticalSpeedParameter |= hash == VerticalSpeedParameter && type == AnimatorControllerParameterType.Float;
+            hasGroundedParameter |= hash == GroundedParameter && type == AnimatorControllerParameterType.Bool;
+            hasCrouchingParameter |= hash == CrouchingParameter && type == AnimatorControllerParameterType.Bool;
+            hasSprintingParameter |= hash == SprintingParameter && type == AnimatorControllerParameterType.Bool;
+            hasThirdPersonParameter |= hash == ThirdPersonParameter && type == AnimatorControllerParameterType.Bool;
+            hasJumpParameter |= hash == JumpParameter && type == AnimatorControllerParameterType.Trigger;
+        }
+    }
+
+    private void TriggerJumpAnimation()
+    {
+        if (characterAnimator == null)
+        {
+            return;
+        }
+
+        if (cachedAnimatorController != characterAnimator.runtimeAnimatorController)
+        {
+            CacheAnimatorParameters();
+        }
+
+        if (hasJumpParameter)
+        {
+            characterAnimator.SetTrigger(JumpParameter);
+        }
+    }
+
+    private void UpdateModelVisibility(bool force)
+    {
+        bool shouldShowModel = showModelInFirstPerson || isThirdPerson;
+        if (!force && modelVisibilityInitialized && modelIsVisible == shouldShowModel)
+        {
+            return;
+        }
+
+        modelVisibilityInitialized = true;
+        modelIsVisible = shouldShowModel;
+        for (int i = 0; i < modelRenderers.Length; i++)
+        {
+            modelRenderers[i].enabled = modelRendererDefaultStates[i] && shouldShowModel;
+        }
     }
 
     private bool HasStandingHeadroom()
