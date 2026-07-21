@@ -1,0 +1,24 @@
+{
+  "name": "BriefcaseProtocol.Runtime",
+  "rootNamespace": "BriefcaseProtocol",
+  "references": [
+    "Unity.Collections",
+    "Unity.InputSystem",
+    "Unity.Netcode.Runtime",
+    "Unity.Services.Authentication",
+    "Unity.Services.Core",
+    "Unity.Services.Multiplayer",
+    "Unity.Services.Vivox",
+    "Unity.Networking.Transport",
+    "Unity.ugui"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

@@ -1,0 +1,45 @@
+# Unity generated folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+[Tt]est[Rr]esults/
+
+# IDE and OS files
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.opendb
+*.VC.db
+*.tmp
+*.swp
+*.DS_Store
+Thumbs.db
+
+# Crash and build artifacts
+sysinfo.txt
+*.apk
+*.aab
+*.unitypackage
+*.pdb
+*.mdb
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# SteamPipe credentials and output
+steamcmd/
+SteamworksSDK/
+*.vdf.user

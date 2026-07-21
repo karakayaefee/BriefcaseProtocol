@@ -1,0 +1,40 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2018990edb1c837409cec87206c1141e, type: 3}
+  m_Name: GameBalance
+  m_EditorClassIdentifier: BriefcaseProtocol.Runtime::BriefcaseProtocol.Core.GameBalanceConfig
+  roleRevealSeconds: 10
+  setupSeconds: 120
+  preparationSeconds: 30
+  operationSeconds: 300
+  revealSeconds: 25
+  resultsSeconds: 20
+  bombBudget: 100
+  decoyBudget: 100
+  wireModuleCost: 20
+  sequenceModuleCost: 25
+  fakeBriefcaseCost: 30
+  soundLureCost: 15
+  controlledDoorCost: 15
+  firstWrongCodePenalty: 5
+  secondWrongCodePenalty: 10
+  repeatedWrongCodePenalty: 15
+  wrongWirePenalty: 10
+  wrongSequencePenalty: 5
+  strikeLimit: 5
+  soundLureCharges: 3
+  soundLureDuration: 4
+  soundLureCooldown: 20
+  controlledDoorCharges: 2
+  controlledDoorWarning: 1
+  controlledDoorDuration: 6
+  controlledDoorCooldown: 30

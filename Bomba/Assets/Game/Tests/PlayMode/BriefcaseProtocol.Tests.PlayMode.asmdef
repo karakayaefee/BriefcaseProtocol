@@ -1,0 +1,15 @@
+{
+  "name": "BriefcaseProtocol.Tests.PlayMode",
+  "rootNamespace": "BriefcaseProtocol.Tests.PlayMode",
+  "references": ["BriefcaseProtocol.Runtime"],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}

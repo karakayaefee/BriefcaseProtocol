@@ -1,0 +1,15 @@
+{
+  "name": "BriefcaseProtocol.Tests.EditMode",
+  "rootNamespace": "BriefcaseProtocol.Tests",
+  "references": ["BriefcaseProtocol.Runtime"],
+  "includePlatforms": ["Editor"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": ["TestAssemblies"]
+}
