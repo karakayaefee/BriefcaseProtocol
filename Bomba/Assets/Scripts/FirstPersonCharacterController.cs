@@ -43,7 +43,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     [SerializeField] private Transform characterModelRoot;
     [Tooltip("Optional. If left empty, the first Animator under CharacterModelRoot is used.")]
     [SerializeField] private Animator characterAnimator;
-    [SerializeField] private bool showModelInFirstPerson = true;
+    [SerializeField] private bool showModelInFirstPerson;
     [SerializeField] private bool hidePlaceholderCapsuleWhenModelAssigned = true;
     [SerializeField, Min(0f)] private float animationDampTime = 0.1f;
 
@@ -185,10 +185,14 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         cameraModeAction?.Dispose();
     }
 
-    public void SetPrefabReferences(Transform newCameraPivot, Transform newCapsuleVisual)
+    public void SetPrefabReferences(
+        Transform newCameraPivot,
+        Transform newCapsuleVisual,
+        Transform newCharacterModelRoot)
     {
         cameraPivot = newCameraPivot;
         capsuleVisual = newCapsuleVisual;
+        characterModelRoot = newCharacterModelRoot;
     }
 
     private void ConfigureCharacterController()
@@ -398,9 +402,10 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void ConfigureAnimationModel()
     {
-        if (characterModelRoot == null)
+        Transform localModelRoot = transform.Find("CharacterModelRoot");
+        if (localModelRoot != null)
         {
-            characterModelRoot = transform.Find("CharacterModelRoot");
+            characterModelRoot = localModelRoot;
         }
 
         if (characterAnimator == null && characterModelRoot != null)

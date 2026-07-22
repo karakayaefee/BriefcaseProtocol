@@ -10,6 +10,7 @@ public static class CharacterPrefabBuilder
     private const string MaterialFolder = "Assets/Materials";
     private const string PrefabPath = PrefabFolder + "/Character.prefab";
     private const string MaterialPath = MaterialFolder + "/CharacterCapsule.mat";
+    private const string CharacterModelPath = "Assets/Characters/Swat/Model/Swat.fbx";
     private const string LobbyScenePath = "Assets/Scenes/Lobby.unity";
 
     [MenuItem("Tools/Briefcase Protocol/Rebuild Character Prefab and Lobby")]
@@ -54,6 +55,14 @@ public static class CharacterPrefabBuilder
             GameObject modelRoot = new GameObject("CharacterModelRoot");
             modelRoot.transform.SetParent(root.transform, false);
 
+            GameObject characterModelPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(CharacterModelPath);
+            if (characterModelPrefab != null)
+            {
+                GameObject characterModel = (GameObject)PrefabUtility.InstantiatePrefab(characterModelPrefab);
+                characterModel.name = "Swat";
+                characterModel.transform.SetParent(modelRoot.transform, false);
+            }
+
             GameObject cameraPivot = new GameObject("CameraPivot");
             cameraPivot.transform.SetParent(root.transform, false);
             cameraPivot.transform.localPosition = new Vector3(0f, 1.65f, 0f);
@@ -68,7 +77,7 @@ public static class CharacterPrefabBuilder
             cameraObject.AddComponent<AudioListener>();
 
             FirstPersonCharacterController controller = root.AddComponent<FirstPersonCharacterController>();
-            controller.SetPrefabReferences(cameraPivot.transform, capsule.transform);
+            controller.SetPrefabReferences(cameraPivot.transform, capsule.transform, modelRoot.transform);
 
             GameObject savedPrefab = PrefabUtility.SaveAsPrefabAsset(root, PrefabPath);
             if (savedPrefab == null)
