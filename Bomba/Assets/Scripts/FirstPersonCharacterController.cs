@@ -38,6 +38,16 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     [SerializeField, Min(0f)] private float thirdPersonCollisionRadius = 0.2f;
     [SerializeField, Min(0f)] private float cameraCollisionPadding = 0.1f;
 
+    [Header("Interaction")]
+    [SerializeField, Min(0.1f)] private float interactionDistance = 3f;
+    [SerializeField] private LayerMask interactionLayers = ~0;
+
+    [Header("Crosshair")]
+    [SerializeField] private bool showCrosshair = true;
+    [SerializeField, Min(4f)] private float crosshairSize = 18f;
+    [SerializeField, Min(1f)] private float crosshairThickness = 2f;
+    [SerializeField] private Color crosshairColor = new Color(1f, 1f, 1f, 0.9f);
+
     [Header("Animation")]
     [Tooltip("Place the imported character prefab under this transform.")]
     [SerializeField] private Transform characterModelRoot;
@@ -54,6 +64,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private readonly Collider[] headroomHits = new Collider[16];
     private readonly RaycastHit[] cameraCollisionHits = new RaycastHit[16];
+    private readonly RaycastHit[] interactionHits = new RaycastHit[16];
 
     private static readonly int SpeedParameter = Animator.StringToHash("Speed");
     private static readonly int MoveXParameter = Animator.StringToHash("MoveX");
@@ -72,9 +83,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private InputAction crouchAction;
     private InputAction sprintAction;
     private InputAction cameraModeAction;
+    private InputAction interactAction;
     private Renderer[] modelRenderers = System.Array.Empty<Renderer>();
     private bool[] modelRendererDefaultStates = System.Array.Empty<bool>();
     private RuntimeAnimatorController cachedAnimatorController;
+    private Texture2D crosshairTexture;
     private Vector3 cameraNeutralLocalPosition;
     private Vector3 currentBobOffset;
     private float verticalVelocity;
@@ -129,6 +142,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
         ConfigureCharacterController();
         CreateInputActions();
+        CreateCrosshairTexture();
         ApplyStanceInstantly(false);
     }
 
@@ -140,11 +154,20 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         crouchAction?.Enable();
         sprintAction?.Enable();
         cameraModeAction?.Enable();
+        interactAction?.Enable();
     }
 
     private void Start()
     {
         LockCursor();
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        if (hasFocus && isActiveAndEnabled && Application.isPlaying)
+        {
+            LockCursor();
+        }
     }
 
     private void Update()
@@ -156,6 +179,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         UpdateMovement();
         UpdateHeadBob();
         UpdateCameraModePosition();
+        UpdateInteraction();
         UpdateAnimation();
     }
 
@@ -167,6 +191,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         crouchAction?.Disable();
         sprintAction?.Disable();
         cameraModeAction?.Disable();
+        interactAction?.Disable();
 
         if (Application.isPlaying)
         {
@@ -183,6 +208,12 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         crouchAction?.Dispose();
         sprintAction?.Dispose();
         cameraModeAction?.Dispose();
+        interactAction?.Dispose();
+
+        if (crosshairTexture != null)
+        {
+            Destroy(crosshairTexture);
+        }
     }
 
     public void SetPrefabReferences(
@@ -223,6 +254,114 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         sprintAction.AddBinding("<Keyboard>/rightShift");
 
         cameraModeAction = new InputAction("Camera Mode", InputActionType.Button, "<Keyboard>/t");
+        interactAction = new InputAction("Interact", InputActionType.Button, "<Keyboard>/e");
+    }
+
+    private void UpdateInteraction()
+    {
+        if (cameraTransform == null || interactAction == null ||
+            !interactAction.WasPressedThisFrame())
+        {
+            return;
+        }
+
+        int hitCount = Physics.RaycastNonAlloc(
+            cameraTransform.position,
+            cameraTransform.forward,
+            interactionHits,
+            interactionDistance,
+            interactionLayers,
+            QueryTriggerInteraction.Collide);
+
+        RaycastHit closestHit = default;
+        float closestDistance = float.PositiveInfinity;
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            RaycastHit hit = interactionHits[i];
+            if (hit.collider == null || hit.collider == characterController ||
+                hit.collider.transform.IsChildOf(transform) || hit.distance >= closestDistance)
+            {
+                continue;
+            }
+
+            closestHit = hit;
+            closestDistance = hit.distance;
+        }
+
+        if (closestHit.collider == null)
+        {
+            return;
+        }
+
+        MonoBehaviour[] behaviours =
+            closestHit.collider.GetComponentsInParent<MonoBehaviour>(true);
+        for (int i = 0; i < behaviours.Length; i++)
+        {
+            if (behaviours[i] is IPlayerInteractable interactable)
+            {
+                interactable.Interact();
+                return;
+            }
+        }
+    }
+
+    private void OnGUI()
+    {
+        if (!showCrosshair || crosshairTexture == null)
+        {
+            return;
+        }
+
+        float size = Mathf.Max(4f, crosshairSize);
+        Rect crosshairRect = new Rect(
+            (Screen.width - size) * 0.5f,
+            (Screen.height - size) * 0.5f,
+            size,
+            size);
+
+        Color previousColor = GUI.color;
+        GUI.color = crosshairColor;
+        GUI.DrawTexture(crosshairRect, crosshairTexture, ScaleMode.StretchToFill, true);
+        GUI.color = previousColor;
+    }
+
+    private void CreateCrosshairTexture()
+    {
+        const int resolution = 64;
+        crosshairTexture = new Texture2D(
+            resolution,
+            resolution,
+            TextureFormat.RGBA32,
+            false)
+        {
+            name = "Runtime Crosshair",
+            filterMode = FilterMode.Bilinear,
+            wrapMode = TextureWrapMode.Clamp,
+            hideFlags = HideFlags.HideAndDontSave
+        };
+
+        float center = (resolution - 1) * 0.5f;
+        float ringRadius = resolution * 0.38f;
+        float scaledThickness = Mathf.Max(
+            1f,
+            crosshairThickness / Mathf.Max(4f, crosshairSize) * resolution);
+        float halfThickness = scaledThickness * 0.5f;
+
+        for (int y = 0; y < resolution; y++)
+        {
+            for (int x = 0; x < resolution; x++)
+            {
+                float distance = Vector2.Distance(
+                    new Vector2(x, y),
+                    new Vector2(center, center));
+                float alpha = Mathf.Clamp01(
+                    halfThickness + 1f - Mathf.Abs(distance - ringRadius));
+                crosshairTexture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+            }
+        }
+
+        crosshairTexture.Apply(false, true);
     }
 
     private void UpdateMovement()
