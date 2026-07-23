@@ -220,6 +220,14 @@ MonoBehaviour:
   cameraModeTransitionSpeed: 10
   thirdPersonCollisionRadius: 0.2
   cameraCollisionPadding: 0.1
+  interactionDistance: 3
+  interactionLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  showCrosshair: 1
+  crosshairSize: 18
+  crosshairThickness: 2
+  crosshairColor: {r: 1, g: 1, b: 1, a: 0.9}
   characterModelRoot: {fileID: 7000000000000000102}
   characterAnimator: {fileID: 0}
   showModelInFirstPerson: 0
