@@ -21,7 +21,11 @@ namespace BriefcaseProtocol.UI
         [Tooltip("Açıkken oyuncu sayısı yetmese de Başlat aktif olur. Sadece test için.")]
         [SerializeField] bool allowStartBelowRequired = true;
 
+        [Tooltip("BriefcaseSessionSettings içindeki sessionType ile aynı olmalı.")]
+        [SerializeField] string sessionType = "briefcase-protocol";
+
         UIDocument document;
+        Label codeLabel;
         Label statusLabel;
         Label phaseLabel;
         Button startButton;
@@ -52,14 +56,26 @@ namespace BriefcaseProtocol.UI
             panel.style.paddingBottom = 12;
             panel.style.paddingLeft = 16;
             panel.style.paddingRight = 16;
-            panel.style.backgroundColor = new Color(0f, 0f, 0f, 0.72f);
-            panel.style.minWidth = 260;
+            panel.style.backgroundColor = new Color(0f, 0f, 0f, 0.78f);
+            panel.style.minWidth = 300;
 
             var title = new Label("LOBI - OYUNCU BEKLENIYOR");
             title.style.color = Color.white;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
             title.style.marginBottom = 8;
             panel.Add(title);
+
+            codeLabel = new Label("Kod aliniyor...");
+            codeLabel.style.color = new Color(1f, 0.85f, 0.3f);
+            codeLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            codeLabel.style.fontSize = 18;
+            codeLabel.style.marginBottom = 4;
+            panel.Add(codeLabel);
+
+            var copyButton = new Button(CopyCode);
+            copyButton.text = "Kodu kopyala";
+            copyButton.style.marginBottom = 8;
+            panel.Add(copyButton);
 
             statusLabel = new Label("Baglaniyor...");
             statusLabel.style.color = Color.white;
@@ -71,12 +87,49 @@ namespace BriefcaseProtocol.UI
             phaseLabel.style.marginBottom = 8;
             panel.Add(phaseLabel);
 
-            startButton = new Button(OnStartClicked) { text = "BASLAT" };
+            startButton = new Button(OnStartClicked);
+            startButton.text = "BASLAT";
             startButton.style.display = DisplayStyle.None;
             panel.Add(startButton);
 
             root.Add(panel);
         }
+
+        /// <summary>Aktif oturumun katılım kodu. Yoksa null döner.</summary>
+        string CurrentCode()
+        {
+            try
+            {
+                var service = Unity.Services.Multiplayer.MultiplayerService.Instance;
+                if (service == null) return null;
+
+                var sessions = service.Sessions;
+                if (sessions == null) return null;
+
+                foreach (var pair in sessions)
+                {
+                    var session = pair.Value;
+                    if (session != null && !string.IsNullOrEmpty(session.Code)) return session.Code;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("[LobbyWaitRoom] Oturum kodu okunamadi: " + e.Message);
+            }
+
+            return null;
+        }
+
+        void CopyCode()
+        {
+            string code = CurrentCode();
+            if (string.IsNullOrEmpty(code)) return;
+
+            GUIUtility.systemCopyBuffer = code;
+            Debug.Log("[LobbyWaitRoom] Kod panoya kopyalandi: " + code);
+        }
+
+
 
         void Update()
         {
@@ -87,7 +140,13 @@ namespace BriefcaseProtocol.UI
                 ? nm.ConnectedClientsIds.Count
                 : (nm.IsConnectedClient ? Mathf.Max(1, Core.NetworkPlayerState.All.Count) : 0);
 
-            statusLabel.text = $"Oyuncu: {connected} / {requiredPlayers}";
+            statusLabel.text = "Oyuncu: " + connected + " / " + requiredPlayers;
+
+            if (codeLabel != null)
+            {
+                string code = CurrentCode();
+                codeLabel.text = string.IsNullOrEmpty(code) ? "Kod: -" : "KOD: " + code;
+            }
 
             var match = Core.MatchManager.Instance;
             var round = Core.RoundManager.Instance;
