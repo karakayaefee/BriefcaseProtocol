@@ -84,6 +84,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private InputAction sprintAction;
     private InputAction cameraModeAction;
     private InputAction interactAction;
+    private InputAction inspectAction;
+    private InputAction inspectRotateAction;
+    private InputAction inspectZoomAction;
+    private IPlayerInspectable activeInspectable;
+    private IInspectionPointerInteractable activeInspectionPointerInteraction;
     private Renderer[] modelRenderers = System.Array.Empty<Renderer>();
     private bool[] modelRendererDefaultStates = System.Array.Empty<bool>();
     private RuntimeAnimatorController cachedAnimatorController;
@@ -155,6 +160,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         sprintAction?.Enable();
         cameraModeAction?.Enable();
         interactAction?.Enable();
+        inspectAction?.Enable();
+        inspectRotateAction?.Enable();
+        inspectZoomAction?.Enable();
     }
 
     private void Start()
@@ -166,14 +174,24 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     {
         if (hasFocus && isActiveAndEnabled && Application.isPlaying)
         {
-            LockCursor();
+            if (activeInspectable != null)
+            {
+                ShowInspectionCursor();
+            }
+            else
+            {
+                LockCursor();
+            }
         }
     }
 
     private void Update()
     {
+        ValidateActiveInspectionState();
         HandleCursorState();
         UpdateCameraModeInput();
+        UpdateInspectionZoom();
+        UpdateInspectionRotation();
         UpdateLook();
         UpdateStance();
         UpdateMovement();
@@ -192,9 +210,25 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         sprintAction?.Disable();
         cameraModeAction?.Disable();
         interactAction?.Disable();
+        inspectAction?.Disable();
+        inspectRotateAction?.Disable();
+        inspectZoomAction?.Disable();
 
         if (Application.isPlaying)
         {
+            if (activeInspectionPointerInteraction != null)
+            {
+                activeInspectionPointerInteraction.ExitInspectionInteraction();
+                activeInspectionPointerInteraction = null;
+            }
+
+            if (activeInspectable != null)
+            {
+                IPlayerInspectable inspectable = activeInspectable;
+                activeInspectable = null;
+                inspectable.ToggleInspection(cameraTransform);
+            }
+
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
         }
@@ -209,6 +243,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         sprintAction?.Dispose();
         cameraModeAction?.Dispose();
         interactAction?.Dispose();
+        inspectAction?.Dispose();
+        inspectRotateAction?.Dispose();
+        inspectZoomAction?.Dispose();
 
         if (crosshairTexture != null)
         {
@@ -255,13 +292,68 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
         cameraModeAction = new InputAction("Camera Mode", InputActionType.Button, "<Keyboard>/t");
         interactAction = new InputAction("Interact", InputActionType.Button, "<Keyboard>/e");
+        inspectAction = new InputAction("Inspect", InputActionType.Button, "<Mouse>/leftButton");
+        inspectRotateAction = new InputAction(
+            "Rotate Inspection",
+            InputActionType.Button,
+            "<Mouse>/rightButton");
+        inspectZoomAction = new InputAction(
+            "Zoom Inspection",
+            InputActionType.Value,
+            "<Mouse>/scroll/y");
+    }
+
+    private void UpdateInspectionZoom()
+    {
+        if (activeInspectable == null ||
+            activeInspectionPointerInteraction != null ||
+            inspectZoomAction == null)
+        {
+            return;
+        }
+
+        activeInspectable.ZoomInspection(inspectZoomAction.ReadValue<float>());
+    }
+
+    private void UpdateInspectionRotation()
+    {
+        if (!IsRotatingInspectedObject())
+        {
+            return;
+        }
+
+        activeInspectable.RotateInspection(lookAction.ReadValue<Vector2>());
+    }
+
+    private bool IsRotatingInspectedObject()
+    {
+        return activeInspectable != null &&
+            activeInspectionPointerInteraction == null &&
+            inspectRotateAction != null &&
+            inspectRotateAction.IsPressed();
     }
 
     private void UpdateInteraction()
     {
-        if (cameraTransform == null || interactAction == null ||
-            !interactAction.WasPressedThisFrame())
+        bool interactPressed = interactAction != null && interactAction.WasPressedThisFrame();
+        bool inspectPressed = inspectAction != null && inspectAction.WasPressedThisFrame();
+
+        if (cameraTransform == null || (!interactPressed && !inspectPressed))
         {
+            return;
+        }
+
+        if (inspectPressed && activeInspectable != null)
+        {
+            if (activeInspectionPointerInteraction == null)
+            {
+                TryBeginInspectionPointerInteraction();
+            }
+            else
+            {
+                TryUseInspectionPointerInteraction();
+            }
+
             return;
         }
 
@@ -296,6 +388,26 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
         MonoBehaviour[] behaviours =
             closestHit.collider.GetComponentsInParent<MonoBehaviour>(true);
+
+        if (inspectPressed)
+        {
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                if (behaviours[i] is IPlayerInspectable inspectable)
+                {
+                    inspectable.ToggleInspection(cameraTransform);
+                    activeInspectable = inspectable;
+                    ShowInspectionCursor();
+                    return;
+                }
+            }
+        }
+
+        if (!interactPressed)
+        {
+            return;
+        }
+
         for (int i = 0; i < behaviours.Length; i++)
         {
             if (behaviours[i] is IPlayerInteractable interactable)
@@ -306,9 +418,90 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         }
     }
 
+    private bool TryBeginInspectionPointerInteraction()
+    {
+        Camera playerCamera = cameraTransform != null
+            ? cameraTransform.GetComponent<Camera>()
+            : null;
+        if (playerCamera == null || Mouse.current == null)
+        {
+            return false;
+        }
+
+        Vector2 pointerPosition = Mouse.current.position.ReadValue();
+        Ray pointerRay = playerCamera.ScreenPointToRay(pointerPosition);
+        int hitCount = Physics.RaycastNonAlloc(
+            pointerRay,
+            interactionHits,
+            interactionDistance,
+            interactionLayers,
+            QueryTriggerInteraction.Collide);
+
+        for (int hitIndex = 0; hitIndex < hitCount; hitIndex++)
+        {
+            Collider hitCollider = interactionHits[hitIndex].collider;
+            if (hitCollider == null || hitCollider == characterController ||
+                hitCollider.transform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            MonoBehaviour[] behaviours =
+                hitCollider.GetComponentsInParent<MonoBehaviour>(true);
+            for (int behaviourIndex = 0; behaviourIndex < behaviours.Length; behaviourIndex++)
+            {
+                if (behaviours[behaviourIndex] is IInspectionPointerInteractable pointerTarget &&
+                    pointerTarget.TryBeginInspectionInteraction(hitCollider, cameraTransform))
+                {
+                    activeInspectionPointerInteraction = pointerTarget;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryUseInspectionPointerInteraction()
+    {
+        Camera playerCamera = cameraTransform != null
+            ? cameraTransform.GetComponent<Camera>()
+            : null;
+        if (playerCamera == null || Mouse.current == null ||
+            activeInspectionPointerInteraction == null)
+        {
+            return false;
+        }
+
+        Ray pointerRay = playerCamera.ScreenPointToRay(Mouse.current.position.ReadValue());
+        int hitCount = Physics.RaycastNonAlloc(
+            pointerRay,
+            interactionHits,
+            interactionDistance,
+            interactionLayers,
+            QueryTriggerInteraction.Collide);
+
+        for (int hitIndex = 0; hitIndex < hitCount; hitIndex++)
+        {
+            Collider hitCollider = interactionHits[hitIndex].collider;
+            if (hitCollider == null || hitCollider == characterController ||
+                hitCollider.transform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            if (activeInspectionPointerInteraction.TryUseInspectionInteraction(hitCollider))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private void OnGUI()
     {
-        if (!showCrosshair || crosshairTexture == null)
+        if (!showCrosshair || crosshairTexture == null || activeInspectable != null)
         {
             return;
         }
@@ -366,25 +559,28 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void UpdateMovement()
     {
+        bool movementEnabled = activeInspectable == null;
         bool isGrounded = characterController.isGrounded;
         if (isGrounded && verticalVelocity < 0f)
         {
             verticalVelocity = -2f;
         }
 
-        if (isGrounded && jumpAction.WasPressedThisFrame())
+        if (movementEnabled && isGrounded && jumpAction.WasPressedThisFrame())
         {
             verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
             TriggerJumpAnimation();
         }
 
-        Vector2 input = moveAction.ReadValue<Vector2>();
+        Vector2 input = movementEnabled
+            ? moveAction.ReadValue<Vector2>()
+            : Vector2.zero;
         if (input.sqrMagnitude > 1f)
         {
             input.Normalize();
         }
 
-        isSprinting = !isCrouching && sprintAction.IsPressed();
+        isSprinting = movementEnabled && !isCrouching && sprintAction.IsPressed();
         float speed = isCrouching ? crouchSpeed : isSprinting ? sprintSpeed : walkSpeed;
         Vector3 horizontalVelocity = (transform.right * input.x + transform.forward * input.y) * speed;
 
@@ -395,7 +591,8 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void UpdateLook()
     {
-        if (cameraPivot == null || Cursor.lockState != CursorLockMode.Locked)
+        if (cameraPivot == null || Cursor.lockState != CursorLockMode.Locked ||
+            activeInspectable != null)
         {
             return;
         }
@@ -409,6 +606,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void UpdateStance()
     {
+        if (activeInspectable != null)
+        {
+            return;
+        }
+
         bool wantsToCrouch = crouchAction.IsPressed();
         if (!wantsToCrouch && isCrouching && !HasStandingHeadroom())
         {
@@ -443,7 +645,10 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
         Vector3 planarVelocity = characterController.velocity;
         planarVelocity.y = 0f;
-        bool shouldBob = !isThirdPerson && characterController.isGrounded && planarVelocity.sqrMagnitude > 0.04f;
+        bool shouldBob = activeInspectable == null &&
+            !isThirdPerson &&
+            characterController.isGrounded &&
+            planarVelocity.sqrMagnitude > 0.04f;
         Vector3 targetOffset = Vector3.zero;
 
         if (shouldBob)
@@ -485,7 +690,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void UpdateCameraModeInput()
     {
-        if (cameraModeAction.WasPressedThisFrame())
+        if (activeInspectable == null && cameraModeAction.WasPressedThisFrame())
         {
             isThirdPerson = !isThirdPerson;
         }
@@ -595,7 +800,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         Vector3 localVelocity = transform.InverseTransformDirection(characterController.velocity);
         float planarSpeed = new Vector2(localVelocity.x, localVelocity.z).magnitude;
         float maximumSpeed = Mathf.Max(sprintSpeed, 0.01f);
-        Vector2 normalizedMovement = moveAction.ReadValue<Vector2>();
+        Vector2 normalizedMovement = activeInspectable == null
+            ? moveAction.ReadValue<Vector2>()
+            : Vector2.zero;
         if (normalizedMovement.sqrMagnitude > 1f)
         {
             normalizedMovement.Normalize();
@@ -794,9 +1001,50 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         Cursor.visible = false;
     }
 
-    private static void HandleCursorState()
+    private static void ShowInspectionCursor()
     {
-        if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+        if (Application.isBatchMode)
+        {
+            return;
+        }
+
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible = true;
+    }
+
+    private void HandleCursorState()
+    {
+        if (activeInspectionPointerInteraction != null &&
+            !activeInspectionPointerInteraction.IsInspectionInteractionActive)
+        {
+            activeInspectionPointerInteraction = null;
+        }
+
+        bool escapePressed =
+            Keyboard.current != null &&
+            Keyboard.current.escapeKey.wasPressedThisFrame;
+
+        if (activeInspectable != null)
+        {
+            ShowInspectionCursor();
+
+            if (escapePressed)
+            {
+                if (activeInspectionPointerInteraction != null)
+                {
+                    activeInspectionPointerInteraction.ExitInspectionInteraction();
+                    activeInspectionPointerInteraction = null;
+                }
+                else
+                {
+                    ReleaseActiveInspection();
+                }
+            }
+
+            return;
+        }
+
+        if (escapePressed)
         {
             Cursor.lockState = CursorLockMode.None;
             Cursor.visible = true;
@@ -805,5 +1053,30 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         {
             LockCursor();
         }
+    }
+
+    private void ValidateActiveInspectionState()
+    {
+        if (activeInspectable is Behaviour inspectableBehaviour &&
+            (inspectableBehaviour == null || !inspectableBehaviour.isActiveAndEnabled))
+        {
+            activeInspectionPointerInteraction = null;
+            activeInspectable = null;
+            LockCursor();
+        }
+    }
+
+    private void ReleaseActiveInspection()
+    {
+        if (activeInspectionPointerInteraction != null)
+        {
+            activeInspectionPointerInteraction.ExitInspectionInteraction();
+            activeInspectionPointerInteraction = null;
+        }
+
+        IPlayerInspectable inspectable = activeInspectable;
+        activeInspectable = null;
+        inspectable.ToggleInspection(cameraTransform);
+        LockCursor();
     }
 }
