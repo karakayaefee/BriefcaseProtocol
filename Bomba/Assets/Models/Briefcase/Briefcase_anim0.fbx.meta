@@ -29,6 +29,16 @@ ModelImporter:
       assembly: UnityEngine.CoreModule
       name: MAT_Rubber_Dark
     second: {fileID: 2100000, guid: f8b899a176bb51944ad9b6945fdedc23, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: MAT_UnityTag_Dark
+    second: {fileID: 2100000, guid: f8b899a176bb51944ad9b6945fdedc23, type: 2}
+  - first:
+      type: UnityEngine:Material
+      assembly: UnityEngine.CoreModule
+      name: MAT_UnityTag_Text
+    second: {fileID: 2100000, guid: b32ac5e4326c381419001f3d96732090, type: 2}
   materials:
     materialImportMode: 2
     materialName: 0
