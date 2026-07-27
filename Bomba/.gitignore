@@ -25,6 +25,7 @@
 /Assets/StreamingAssets/EOS/eos_linux_config.json*
 /Assets/StreamingAssets/EOS/eos_macos_config.json*
 /Assets/StreamingAssets/EOS/eos_windows_config.json*
+/Assets/StreamingAssets/EOS/eos_product_config.json*
 
 # By default unity supports Blender asset imports, *.blend1 blender files do not need to be commited to version control.
 *.blend1
