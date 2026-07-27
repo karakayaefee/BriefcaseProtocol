@@ -262,30 +262,13 @@ namespace BriefcaseProtocol.Voice
             }
             else
             {
-                var createDeviceOptions = new CreateDeviceIdOptions
+                LoginCallbackInfo loginInfo = await LoginWithDeviceIdAsync();
+                if (DeviceIdCredentialsAreMissing(loginInfo))
                 {
-                    DeviceModel = LimitUtf8(SystemInfo.deviceModel, 64, "WindowsPC")
-                };
-                var createDeviceCompletion = new TaskCompletionSource<Result>();
-                connectInterface.CreateDeviceId(
-                    ref createDeviceOptions,
-                    null,
-                    (ref CreateDeviceIdCallbackInfo data) => createDeviceCompletion.TrySetResult(data.ResultCode));
-
-                Result createDeviceResult = await AwaitWithTimeout(
-                    createDeviceCompletion.Task,
-                    "EOS Device ID olusturma");
-                if (createDeviceResult != Result.Success && createDeviceResult != Result.DuplicateNotAllowed)
-                {
-                    throw new InvalidOperationException("EOS Device ID olusturulamadi: " + createDeviceResult);
+                    await CreateDeviceIdAsync(connectInterface);
+                    loginInfo = await LoginWithDeviceIdAsync();
                 }
 
-                var loginCompletion = new TaskCompletionSource<LoginCallbackInfo>();
-                EOSManager.Instance.StartConnectLoginWithDeviceToken(
-                    ResolveLocalDisplayName(),
-                    data => loginCompletion.TrySetResult(data));
-
-                LoginCallbackInfo loginInfo = await AwaitWithTimeout(loginCompletion.Task, "EOS Connect girisi");
                 if (loginInfo.ResultCode == Result.InvalidUser && loginInfo.ContinuanceToken != null)
                 {
                     var createUserCompletion = new TaskCompletionSource<CreateUserCallbackInfo>();
@@ -316,6 +299,41 @@ namespace BriefcaseProtocol.Voice
 
             eosInitialized = true;
             SubscribeLobbyNotifications();
+        }
+
+        async Task<LoginCallbackInfo> LoginWithDeviceIdAsync()
+        {
+            var completion = new TaskCompletionSource<LoginCallbackInfo>();
+            EOSManager.Instance.StartConnectLoginWithDeviceToken(
+                ResolveLocalDisplayName(),
+                data => completion.TrySetResult(data));
+            return await AwaitWithTimeout(completion.Task, "EOS Connect girisi");
+        }
+
+        static bool DeviceIdCredentialsAreMissing(LoginCallbackInfo loginInfo)
+        {
+            return loginInfo.ResultCode == Result.NotFound ||
+                   loginInfo.ResultCode == Result.InvalidAuth ||
+                   (loginInfo.ResultCode == Result.InvalidUser && loginInfo.ContinuanceToken == null);
+        }
+
+        static async Task CreateDeviceIdAsync(ConnectInterface connectInterface)
+        {
+            var options = new CreateDeviceIdOptions
+            {
+                DeviceModel = LimitUtf8(SystemInfo.deviceModel, 64, "WindowsPC")
+            };
+            var completion = new TaskCompletionSource<Result>();
+            connectInterface.CreateDeviceId(
+                ref options,
+                null,
+                (ref CreateDeviceIdCallbackInfo data) => completion.TrySetResult(data.ResultCode));
+
+            Result result = await AwaitWithTimeout(completion.Task, "EOS Device ID olusturma");
+            if (result != Result.Success && result != Result.DuplicateNotAllowed)
+            {
+                throw new InvalidOperationException("EOS Device ID olusturulamadi: " + result);
+            }
         }
 
         static void EnsureEOSManagerExists()
