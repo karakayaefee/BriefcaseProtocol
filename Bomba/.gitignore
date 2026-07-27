@@ -18,6 +18,14 @@
 # EOS Plugin local editor/signing configuration (may contain PFX credentials)
 /etc/
 
+# EOS runtime platform configurations contain Client Secret and Encryption Key.
+# Generate these locally from EOS Plugin > EOS Configuration; never commit them.
+/Assets/StreamingAssets/EOS/eos_android_config.json*
+/Assets/StreamingAssets/EOS/eos_ios_config.json*
+/Assets/StreamingAssets/EOS/eos_linux_config.json*
+/Assets/StreamingAssets/EOS/eos_macos_config.json*
+/Assets/StreamingAssets/EOS/eos_windows_config.json*
+
 # By default unity supports Blender asset imports, *.blend1 blender files do not need to be commited to version control.
 *.blend1
 *.blend1.meta
