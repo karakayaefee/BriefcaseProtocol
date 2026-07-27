@@ -1,13 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using BriefcaseProtocol.Core;
+using Epic.OnlineServices;
+using Epic.OnlineServices.Connect;
+using Epic.OnlineServices.Lobby;
+using Epic.OnlineServices.RTC;
+using Epic.OnlineServices.RTCAudio;
+using PlayEveryWare.EpicOnlineServices;
 using Unity.Netcode;
 using Unity.Services.Authentication;
-using Unity.Services.Core;
 using Unity.Services.Multiplayer;
-using Unity.Services.Vivox;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
@@ -15,40 +20,84 @@ using UnityEngine.SceneManagement;
 namespace BriefcaseProtocol.Voice
 {
     /// <summary>
-    /// Vivox sesli sohbet yaşam döngüsünü Multiplayer Session ve NGO sahneleriyle eşler.
-    /// Lobby'de ortak, Game'de takım başına ayrı bir 2D ses kanalı kullanır.
+    /// EOS Connect ve EOS Lobby RTC tabanli sesli sohbet yasam dongusu.
+    /// Lobby sahnesinde ortak, Game sahnesinde takim basina ayri bir RTC odasi kullanir.
+    /// Oyun trafigi Unity Netcode/Relay uzerinden devam eder; EOS yalnizca sesi tasir.
     /// </summary>
     [DisallowMultipleComponent]
     public sealed class VoiceChatManager : MonoBehaviour
     {
         const string LobbySceneName = "Lobby";
         const string GameSceneName = "Game";
+        const string VoiceLobbyBucket = "briefcase-protocol-voice";
+        const string DisplayNameAttribute = "BP_NAME";
+        const uint VoiceLobbyCapacity = 16;
         const float ReconcileIntervalSeconds = 0.5f;
-        const float RetryDelaySeconds = 15f;
+        const float RetryDelaySeconds = 5f;
+        const int OperationTimeoutMilliseconds = 15000;
 
         static VoiceChatManager instance;
 
-        readonly HashSet<VivoxParticipant> observedParticipants = new HashSet<VivoxParticipant>();
+        readonly Dictionary<string, VoiceParticipant> participants = new Dictionary<string, VoiceParticipant>();
+        readonly HashSet<string> manuallyMutedParticipants = new HashSet<string>();
+        readonly Dictionary<string, bool> requestedReceivingState = new Dictionary<string, bool>();
 
         bool lifecycleBusy;
-        bool vivoxInitialized;
-        bool eventsSubscribed;
+        bool eosInitialized;
         bool shuttingDown;
         bool pushToTalkActive;
+        bool allIncomingMuted;
+        bool rtcConnected;
+        bool? requestedSendingState;
         float nextReconcileTime;
         float retryAfterTime;
         string currentChannel;
         string currentChannelLabel;
+        string currentVoiceLobbyId;
+        string currentRtcRoomName;
+        string publishedDisplayName;
         string statusText = "Ses: oturum bekleniyor";
+        ProductUserId localProductUserId;
+
+        ulong lobbyMemberUpdateNotification;
+        ulong lobbyMemberStatusNotification;
+        ulong rtcConnectionNotification;
+        ulong rtcParticipantStatusNotification;
+        ulong rtcParticipantAudioNotification;
 
         public static VoiceChatManager Instance => instance;
         public string CurrentChannel => currentChannel;
         public string CurrentChannelLabel => currentChannelLabel;
         public string StatusText => statusText;
         public bool IsPushToTalkActive => pushToTalkActive;
-        public bool IsReady => vivoxInitialized && VivoxService.Instance.IsLoggedIn && !string.IsNullOrEmpty(currentChannel);
+        public bool IsReady => eosInitialized && localProductUserId != null && localProductUserId.IsValid() &&
+                               !string.IsNullOrEmpty(currentVoiceLobbyId) &&
+                               !string.IsNullOrEmpty(currentRtcRoomName) && rtcConnected;
 
         public event Action StateChanged;
+
+        sealed class VoiceParticipant
+        {
+            public ProductUserId ProductUserId;
+            public string Id;
+            public string DisplayName;
+            public bool IsInRoom;
+            public bool IsSpeaking;
+        }
+
+        readonly struct VoiceTarget
+        {
+            public VoiceTarget(string channelName, string channelLabel)
+            {
+                ChannelName = channelName;
+                ChannelLabel = channelLabel;
+                VoiceLobbyId = BuildDeterministicLobbyId(channelName);
+            }
+
+            public string ChannelName { get; }
+            public string ChannelLabel { get; }
+            public string VoiceLobbyId { get; }
+        }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void ResetStatics()
@@ -95,7 +144,6 @@ namespace BriefcaseProtocol.Voice
         void OnGUI()
         {
             if (Application.isBatchMode || !IsVoiceScene()) return;
-
             DrawVoiceOverlay();
         }
 
@@ -107,12 +155,8 @@ namespace BriefcaseProtocol.Voice
         void OnApplicationQuit()
         {
             shuttingDown = true;
-            SetPushToTalk(false);
-
-            if (vivoxInitialized && VivoxService.Instance.IsLoggedIn)
-            {
-                _ = ShutdownVivoxAsync();
-            }
+            ForceDisableSending();
+            BeginLeaveWithoutWaiting();
         }
 
         void OnDestroy()
@@ -120,7 +164,8 @@ namespace BriefcaseProtocol.Voice
             if (instance != this) return;
 
             SceneManager.sceneLoaded -= HandleSceneLoaded;
-            UnsubscribeVivoxEvents();
+            UnsubscribeRtcNotifications();
+            UnsubscribeLobbyNotifications();
             instance = null;
         }
 
@@ -136,34 +181,47 @@ namespace BriefcaseProtocol.Voice
 
             try
             {
-                if (!TryGetTargetChannel(out string targetChannel, out string targetLabel))
+                if (!TryGetTarget(out VoiceTarget target))
                 {
-                    await LeaveCurrentChannelAsync();
-                    SetStatus(IsVoiceScene() ? "Ses: oturum veya takım bekleniyor" : "Ses: kapalı");
+                    await LeaveCurrentVoiceLobbyAsync();
+                    SetStatus(IsVoiceScene() ? "Ses: oturum veya takim bekleniyor" : "Ses: kapali");
                     return;
                 }
 
-                if (!vivoxInitialized || !VivoxService.Instance.IsLoggedIn)
+                if (!eosInitialized)
                 {
                     if (Time.unscaledTime < retryAfterTime) return;
-                    await InitializeVivoxAsync();
+                    await InitializeEOSAsync();
                 }
 
-                if (string.Equals(currentChannel, targetChannel, StringComparison.Ordinal))
+                if (!string.Equals(currentChannel, target.ChannelName, StringComparison.Ordinal))
                 {
-                    currentChannelLabel = targetLabel;
-                    SetStatus("Ses: " + targetLabel);
-                    return;
+                    await LeaveCurrentVoiceLobbyAsync();
+                    await JoinOrCreateVoiceLobbyAsync(target);
+                }
+                else
+                {
+                    currentChannelLabel = target.ChannelLabel;
+                    string displayName = ResolveLocalDisplayName();
+                    if (!string.Equals(displayName, publishedDisplayName, StringComparison.Ordinal))
+                    {
+                        await PublishDisplayNameAsync(displayName);
+                    }
+
+                    RefreshParticipants();
+                    ApplyReceivingPreferences();
                 }
 
-                await SwitchChannelAsync(targetChannel, targetLabel);
+                SetStatus(rtcConnected
+                    ? "Ses: " + target.ChannelLabel
+                    : "Ses: " + target.ChannelLabel + " RTC baglantisi bekleniyor");
             }
             catch (Exception exception)
             {
                 retryAfterTime = Time.unscaledTime + RetryDelaySeconds;
                 SetPushToTalk(false);
-                SetStatus("Ses bağlantı hatası: " + FriendlyError(exception));
-                Debug.LogWarning("[VoiceChat] " + exception);
+                SetStatus("Ses baglanti hatasi: " + FriendlyError(exception));
+                Debug.LogWarning("[VoiceChat/EOS] " + exception);
             }
             finally
             {
@@ -171,135 +229,645 @@ namespace BriefcaseProtocol.Voice
             }
         }
 
-        async Task InitializeVivoxAsync()
+        async Task InitializeEOSAsync()
         {
             SetStatus("Ses: mikrofon izni bekleniyor");
-            bool hasMicrophonePermission = await EnsureMicrophonePermissionAsync();
-            if (!hasMicrophonePermission)
+            if (!await EnsureMicrophonePermissionAsync())
             {
                 throw new InvalidOperationException("Mikrofon izni verilmedi");
             }
 
-            SetStatus("Ses: servisler hazırlanıyor");
-            while (UnityServices.State == ServicesInitializationState.Initializing)
-            {
-                await Task.Yield();
-            }
+            SetStatus("Ses: EOS hazirlaniyor");
+            EnsureEOSManagerExists();
+            await Task.Yield();
 
-            if (UnityServices.State != ServicesInitializationState.Initialized)
-            {
-                await UnityServices.InitializeAsync();
-            }
-
-            if (!AuthenticationService.Instance.IsSignedIn)
-            {
-                await AuthenticationService.Instance.SignInAnonymouslyAsync();
-            }
-
-            if (!vivoxInitialized)
-            {
-                try
-                {
-                    await VivoxService.Instance.InitializeAsync();
-                }
-                catch (NullReferenceException exception)
-                {
-                    throw new InvalidOperationException(
-                        "Vivox kimlik bilgileri eksik. Dashboard'da Vivox'u etkinleştirip " +
-                        "Unity > Project Settings > Services > Vivox > Environment: Automatic seçin.",
-                        exception);
-                }
-
-                vivoxInitialized = true;
-                SubscribeVivoxEvents();
-            }
-
-            if (!VivoxService.Instance.IsLoggedIn)
-            {
-                var loginOptions = new LoginOptions
-                {
-                    DisplayName = ResolveLocalDisplayName(),
-                    ParticipantUpdateFrequency = ParticipantPropertyUpdateFrequency.StateChange
-                };
-
-                await VivoxService.Instance.LoginAsync(loginOptions);
-            }
-
-            // Bas-konuş varsayılanı: hiçbir tuşa basılmıyorken mikrofon kapalıdır.
-            VivoxService.Instance.MuteInputDevice();
-            pushToTalkActive = false;
-        }
-
-        async Task SwitchChannelAsync(string targetChannel, string targetLabel)
-        {
-            await LeaveCurrentChannelAsync();
-
-            SetStatus("Ses: " + targetLabel + " kanalına bağlanıyor");
-            await VivoxService.Instance.JoinGroupChannelAsync(
-                targetChannel,
-                ChatCapability.AudioOnly,
-                new ChannelOptions { MakeActiveChannelUponJoining = true });
-
-            await VivoxService.Instance.SetChannelTransmissionModeAsync(TransmissionMode.Single, targetChannel);
-
-            currentChannel = targetChannel;
-            currentChannelLabel = targetLabel;
-            VivoxService.Instance.MuteInputDevice();
-            pushToTalkActive = false;
-            ObserveCurrentParticipants();
-            SetStatus("Ses: " + targetLabel);
-
-            Debug.Log("[VoiceChat] Kanala bağlanıldı: " + targetChannel);
-        }
-
-        async Task LeaveCurrentChannelAsync()
-        {
-            if (string.IsNullOrEmpty(currentChannel)) return;
-
-            string channelToLeave = currentChannel;
-            SetPushToTalk(false);
-
-            if (vivoxInitialized && VivoxService.Instance.IsLoggedIn &&
-                VivoxService.Instance.ActiveChannels.ContainsKey(channelToLeave))
-            {
-                await VivoxService.Instance.LeaveChannelAsync(channelToLeave);
-            }
-
-            if (string.Equals(currentChannel, channelToLeave, StringComparison.Ordinal))
-            {
-                currentChannel = null;
-                currentChannelLabel = null;
-            }
-
-            ClearObservedParticipants();
-            Debug.Log("[VoiceChat] Kanaldan çıkıldı: " + channelToLeave);
-            RaiseStateChanged();
-        }
-
-        async Task ShutdownVivoxAsync()
-        {
+            ConnectInterface connectInterface;
             try
             {
-                await VivoxService.Instance.LeaveAllChannelsAsync();
-                await VivoxService.Instance.LogoutAsync();
+                connectInterface = EOSManager.Instance.GetEOSConnectInterface();
             }
             catch (Exception exception)
             {
-                Debug.LogWarning("[VoiceChat] Kapanış sırasında hata: " + exception.Message);
+                throw MissingConfigurationException(exception);
+            }
+
+            if (connectInterface == null)
+            {
+                throw MissingConfigurationException(null);
+            }
+
+            if (EOSManager.Instance.HasLoggedInWithConnect())
+            {
+                localProductUserId = EOSManager.Instance.GetProductUserId();
+            }
+            else
+            {
+                var createDeviceOptions = new CreateDeviceIdOptions
+                {
+                    DeviceModel = LimitUtf8(SystemInfo.deviceModel, 64, "WindowsPC")
+                };
+                var createDeviceCompletion = new TaskCompletionSource<Result>();
+                connectInterface.CreateDeviceId(
+                    ref createDeviceOptions,
+                    null,
+                    (ref CreateDeviceIdCallbackInfo data) => createDeviceCompletion.TrySetResult(data.ResultCode));
+
+                Result createDeviceResult = await AwaitWithTimeout(
+                    createDeviceCompletion.Task,
+                    "EOS Device ID olusturma");
+                if (createDeviceResult != Result.Success && createDeviceResult != Result.DuplicateNotAllowed)
+                {
+                    throw new InvalidOperationException("EOS Device ID olusturulamadi: " + createDeviceResult);
+                }
+
+                var loginCompletion = new TaskCompletionSource<LoginCallbackInfo>();
+                EOSManager.Instance.StartConnectLoginWithDeviceToken(
+                    ResolveLocalDisplayName(),
+                    data => loginCompletion.TrySetResult(data));
+
+                LoginCallbackInfo loginInfo = await AwaitWithTimeout(loginCompletion.Task, "EOS Connect girisi");
+                if (loginInfo.ResultCode == Result.InvalidUser && loginInfo.ContinuanceToken != null)
+                {
+                    var createUserCompletion = new TaskCompletionSource<CreateUserCallbackInfo>();
+                    EOSManager.Instance.CreateConnectUserWithContinuanceToken(
+                        loginInfo.ContinuanceToken,
+                        data => createUserCompletion.TrySetResult(data));
+
+                    CreateUserCallbackInfo createUserInfo = await AwaitWithTimeout(
+                        createUserCompletion.Task,
+                        "EOS Connect kullanicisi olusturma");
+                    if (createUserInfo.ResultCode != Result.Success)
+                    {
+                        throw new InvalidOperationException("EOS Connect kullanicisi olusturulamadi: " + createUserInfo.ResultCode);
+                    }
+                }
+                else if (loginInfo.ResultCode != Result.Success)
+                {
+                    throw new InvalidOperationException("EOS Connect girisi basarisiz: " + loginInfo.ResultCode);
+                }
+
+                localProductUserId = EOSManager.Instance.GetProductUserId();
+            }
+
+            if (localProductUserId == null || !localProductUserId.IsValid())
+            {
+                throw new InvalidOperationException("EOS Connect gecerli bir Product User ID dondurmedi");
+            }
+
+            eosInitialized = true;
+            SubscribeLobbyNotifications();
+        }
+
+        static void EnsureEOSManagerExists()
+        {
+            if (UnityEngine.Object.FindAnyObjectByType<EOSManager>() != null) return;
+
+            try
+            {
+                var eosObject = new GameObject("EOSManager");
+                eosObject.AddComponent<EOSManager>();
+            }
+            catch (Exception exception)
+            {
+                throw MissingConfigurationException(exception);
             }
         }
 
-        static async Task<bool> EnsureMicrophonePermissionAsync()
+        static InvalidOperationException MissingConfigurationException(Exception innerException)
         {
-            if (Application.HasUserAuthorization(UserAuthorization.Microphone)) return true;
+            return new InvalidOperationException(
+                "EOS ayarlari eksik. Unity'de EOS Plugin > EOS Configuration ekranini doldurun.",
+                innerException);
+        }
 
-            AsyncOperation request = Application.RequestUserAuthorization(UserAuthorization.Microphone);
-            while (!request.isDone)
+        async Task JoinOrCreateVoiceLobbyAsync(VoiceTarget target)
+        {
+            currentChannel = target.ChannelName;
+            currentChannelLabel = target.ChannelLabel;
+
+            SetStatus("Ses: " + target.ChannelLabel + " EOS lobisine baglaniyor");
+            JoinLobbyByIdCallbackInfo joinInfo = await JoinVoiceLobbyByIdAsync(target.VoiceLobbyId);
+            if (joinInfo.ResultCode == Result.Success)
             {
-                await Task.Yield();
+                await FinishVoiceLobbyJoinAsync((string)joinInfo.LobbyId, target);
+                return;
             }
 
-            return Application.HasUserAuthorization(UserAuthorization.Microphone);
+            if (joinInfo.ResultCode != Result.NotFound)
+            {
+                ClearCurrentChannelState();
+                throw new InvalidOperationException("EOS ses lobisine katilinamadi: " + joinInfo.ResultCode);
+            }
+
+            CreateLobbyCallbackInfo createInfo = await CreateVoiceLobbyAsync(target.VoiceLobbyId);
+            if (createInfo.ResultCode == Result.Success)
+            {
+                await FinishVoiceLobbyJoinAsync((string)createInfo.LobbyId, target);
+                return;
+            }
+
+            if (createInfo.ResultCode == Result.LobbyLobbyAlreadyExists)
+            {
+                await Task.Delay(250);
+                joinInfo = await JoinVoiceLobbyByIdAsync(target.VoiceLobbyId);
+                if (joinInfo.ResultCode == Result.Success)
+                {
+                    await FinishVoiceLobbyJoinAsync((string)joinInfo.LobbyId, target);
+                    return;
+                }
+            }
+
+            ClearCurrentChannelState();
+            throw new InvalidOperationException("EOS ses lobisi olusturulamadi: " + createInfo.ResultCode);
+        }
+
+        async Task<JoinLobbyByIdCallbackInfo> JoinVoiceLobbyByIdAsync(string lobbyId)
+        {
+            var options = new JoinLobbyByIdOptions
+            {
+                LobbyId = lobbyId,
+                LocalUserId = localProductUserId,
+                PresenceEnabled = false,
+                CrossplayOptOut = false,
+                RTCRoomJoinActionType = LobbyRTCRoomJoinActionType.AutomaticJoin
+            };
+            var completion = new TaskCompletionSource<JoinLobbyByIdCallbackInfo>();
+            EOSManager.Instance.GetEOSLobbyInterface().JoinLobbyById(
+                ref options,
+                null,
+                (ref JoinLobbyByIdCallbackInfo data) => completion.TrySetResult(data));
+            return await AwaitWithTimeout(completion.Task, "EOS ses lobisine katilma");
+        }
+
+        async Task<CreateLobbyCallbackInfo> CreateVoiceLobbyAsync(string lobbyId)
+        {
+            var options = new CreateLobbyOptions
+            {
+                LocalUserId = localProductUserId,
+                MaxLobbyMembers = VoiceLobbyCapacity,
+                PermissionLevel = LobbyPermissionLevel.Publicadvertised,
+                PresenceEnabled = false,
+                AllowInvites = false,
+                BucketId = VoiceLobbyBucket,
+                DisableHostMigration = false,
+                EnableRTCRoom = true,
+                LobbyId = lobbyId,
+                EnableJoinById = true,
+                RejoinAfterKickRequiresInvite = false,
+                CrossplayOptOut = false,
+                RTCRoomJoinActionType = LobbyRTCRoomJoinActionType.AutomaticJoin
+            };
+            var completion = new TaskCompletionSource<CreateLobbyCallbackInfo>();
+            EOSManager.Instance.GetEOSLobbyInterface().CreateLobby(
+                ref options,
+                null,
+                (ref CreateLobbyCallbackInfo data) => completion.TrySetResult(data));
+            return await AwaitWithTimeout(completion.Task, "EOS ses lobisi olusturma");
+        }
+
+        async Task FinishVoiceLobbyJoinAsync(string lobbyId, VoiceTarget target)
+        {
+            currentVoiceLobbyId = string.IsNullOrEmpty(lobbyId) ? target.VoiceLobbyId : lobbyId;
+            currentChannel = target.ChannelName;
+            currentChannelLabel = target.ChannelLabel;
+            publishedDisplayName = null;
+            requestedSendingState = null;
+            requestedReceivingState.Clear();
+
+            var roomOptions = new GetRTCRoomNameOptions
+            {
+                LobbyId = currentVoiceLobbyId,
+                LocalUserId = localProductUserId
+            };
+            Result roomResult = EOSManager.Instance.GetEOSLobbyInterface().GetRTCRoomName(
+                ref roomOptions,
+                out Utf8String roomName);
+            if (roomResult != Result.Success || string.IsNullOrEmpty((string)roomName))
+            {
+                throw new InvalidOperationException("EOS RTC oda adi alinamadi: " + roomResult);
+            }
+
+            currentRtcRoomName = roomName;
+            SubscribeRtcNotifications();
+
+            var connectionOptions = new IsRTCRoomConnectedOptions
+            {
+                LobbyId = currentVoiceLobbyId,
+                LocalUserId = localProductUserId
+            };
+            Result connectionResult = EOSManager.Instance.GetEOSLobbyInterface().IsRTCRoomConnected(
+                ref connectionOptions,
+                out bool isConnected);
+            rtcConnected = connectionResult == Result.Success && isConnected;
+
+            ForceDisableSending();
+            await PublishDisplayNameAsync(ResolveLocalDisplayName());
+            RefreshParticipants();
+            ApplyReceivingPreferences();
+            RaiseStateChanged();
+
+            Debug.Log("[VoiceChat/EOS] Kanala baglanildi: " + target.ChannelName +
+                      " (EOS Lobby: " + currentVoiceLobbyId + ")");
+        }
+
+        async Task PublishDisplayNameAsync(string displayName)
+        {
+            if (string.IsNullOrEmpty(currentVoiceLobbyId)) return;
+
+            var modificationOptions = new UpdateLobbyModificationOptions
+            {
+                LobbyId = currentVoiceLobbyId,
+                LocalUserId = localProductUserId
+            };
+            Result result = EOSManager.Instance.GetEOSLobbyInterface().UpdateLobbyModification(
+                ref modificationOptions,
+                out LobbyModification modification);
+            if (result != Result.Success || modification == null)
+            {
+                throw new InvalidOperationException("EOS ses oyuncu bilgisi hazirlanamadi: " + result);
+            }
+
+            var attributeData = new AttributeData
+            {
+                Key = DisplayNameAttribute,
+                Value = LimitUtf8(displayName, 50, "Oyuncu")
+            };
+            var addAttributeOptions = new LobbyModificationAddMemberAttributeOptions
+            {
+                Attribute = attributeData,
+                Visibility = LobbyAttributeVisibility.Public
+            };
+            result = modification.AddMemberAttribute(ref addAttributeOptions);
+            if (result != Result.Success)
+            {
+                modification.Release();
+                throw new InvalidOperationException("EOS ses oyuncu adi eklenemedi: " + result);
+            }
+
+            var updateOptions = new UpdateLobbyOptions { LobbyModificationHandle = modification };
+            var completion = new TaskCompletionSource<Result>();
+            EOSManager.Instance.GetEOSLobbyInterface().UpdateLobby(
+                ref updateOptions,
+                null,
+                (ref UpdateLobbyCallbackInfo data) =>
+                {
+                    modification.Release();
+                    completion.TrySetResult(data.ResultCode);
+                });
+
+            result = await AwaitWithTimeout(completion.Task, "EOS ses oyuncu adini yayinlama");
+            if (result != Result.Success && result != Result.NoChange)
+            {
+                throw new InvalidOperationException("EOS ses oyuncu adi yayinlanamadi: " + result);
+            }
+
+            publishedDisplayName = displayName;
+        }
+
+        async Task LeaveCurrentVoiceLobbyAsync()
+        {
+            if (string.IsNullOrEmpty(currentVoiceLobbyId))
+            {
+                ClearCurrentChannelState();
+                return;
+            }
+
+            string lobbyToLeave = currentVoiceLobbyId;
+            ForceDisableSending();
+            UnsubscribeRtcNotifications();
+
+            var options = new LeaveLobbyOptions
+            {
+                LobbyId = lobbyToLeave,
+                LocalUserId = localProductUserId
+            };
+            var completion = new TaskCompletionSource<Result>();
+            EOSManager.Instance.GetEOSLobbyInterface().LeaveLobby(
+                ref options,
+                null,
+                (ref LeaveLobbyCallbackInfo data) => completion.TrySetResult(data.ResultCode));
+
+            Result result = await AwaitWithTimeout(completion.Task, "EOS ses lobisinden ayrilma");
+            ClearCurrentChannelState();
+
+            if (result != Result.Success && result != Result.NotFound)
+            {
+                Debug.LogWarning("[VoiceChat/EOS] Lobiden ayrilma sonucu: " + result);
+            }
+            else
+            {
+                Debug.Log("[VoiceChat/EOS] Kanaldan cikildi: " + lobbyToLeave);
+            }
+        }
+
+        void BeginLeaveWithoutWaiting()
+        {
+            if (!eosInitialized || string.IsNullOrEmpty(currentVoiceLobbyId) || localProductUserId == null) return;
+
+            try
+            {
+                var options = new LeaveLobbyOptions
+                {
+                    LobbyId = currentVoiceLobbyId,
+                    LocalUserId = localProductUserId
+                };
+                EOSManager.Instance.GetEOSLobbyInterface().LeaveLobby(ref options, null, null);
+            }
+            catch
+            {
+                // Uygulama kapanirken EOS SDK daha once kapanmis olabilir.
+            }
+        }
+
+        void ClearCurrentChannelState()
+        {
+            currentChannel = null;
+            currentChannelLabel = null;
+            currentVoiceLobbyId = null;
+            currentRtcRoomName = null;
+            publishedDisplayName = null;
+            rtcConnected = false;
+            pushToTalkActive = false;
+            requestedSendingState = null;
+            participants.Clear();
+            manuallyMutedParticipants.Clear();
+            requestedReceivingState.Clear();
+            RaiseStateChanged();
+        }
+
+        void SubscribeLobbyNotifications()
+        {
+            LobbyInterface lobbyInterface = EOSManager.Instance.GetEOSLobbyInterface();
+
+            if (lobbyMemberUpdateNotification == 0)
+            {
+                var options = new AddNotifyLobbyMemberUpdateReceivedOptions();
+                lobbyMemberUpdateNotification = lobbyInterface.AddNotifyLobbyMemberUpdateReceived(
+                    ref options,
+                    null,
+                    HandleLobbyMemberUpdated);
+            }
+
+            if (lobbyMemberStatusNotification == 0)
+            {
+                var options = new AddNotifyLobbyMemberStatusReceivedOptions();
+                lobbyMemberStatusNotification = lobbyInterface.AddNotifyLobbyMemberStatusReceived(
+                    ref options,
+                    null,
+                    HandleLobbyMemberStatusChanged);
+            }
+        }
+
+        void UnsubscribeLobbyNotifications()
+        {
+            if (!eosInitialized) return;
+
+            try
+            {
+                LobbyInterface lobbyInterface = EOSManager.Instance.GetEOSLobbyInterface();
+                if (lobbyMemberUpdateNotification != 0)
+                {
+                    lobbyInterface.RemoveNotifyLobbyMemberUpdateReceived(lobbyMemberUpdateNotification);
+                    lobbyMemberUpdateNotification = 0;
+                }
+
+                if (lobbyMemberStatusNotification != 0)
+                {
+                    lobbyInterface.RemoveNotifyLobbyMemberStatusReceived(lobbyMemberStatusNotification);
+                    lobbyMemberStatusNotification = 0;
+                }
+            }
+            catch
+            {
+                // Kapanis sirasinda EOS arayuzu artik mevcut olmayabilir.
+            }
+        }
+
+        void SubscribeRtcNotifications()
+        {
+            UnsubscribeRtcNotifications();
+
+            LobbyInterface lobbyInterface = EOSManager.Instance.GetEOSLobbyInterface();
+            var connectionOptions = new AddNotifyRTCRoomConnectionChangedOptions();
+            rtcConnectionNotification = lobbyInterface.AddNotifyRTCRoomConnectionChanged(
+                ref connectionOptions,
+                null,
+                HandleRtcRoomConnectionChanged);
+
+            Epic.OnlineServices.RTC.RTCInterface rtcInterface = EOSManager.Instance.GetEOSRTCInterface();
+            var participantOptions = new AddNotifyParticipantStatusChangedOptions
+            {
+                LocalUserId = localProductUserId,
+                RoomName = currentRtcRoomName
+            };
+            rtcParticipantStatusNotification = rtcInterface.AddNotifyParticipantStatusChanged(
+                ref participantOptions,
+                null,
+                HandleRtcParticipantStatusChanged);
+
+            RTCAudioInterface audioInterface = rtcInterface.GetAudioInterface();
+            var audioOptions = new AddNotifyParticipantUpdatedOptions
+            {
+                LocalUserId = localProductUserId,
+                RoomName = currentRtcRoomName
+            };
+            rtcParticipantAudioNotification = audioInterface.AddNotifyParticipantUpdated(
+                ref audioOptions,
+                null,
+                HandleRtcParticipantAudioUpdated);
+        }
+
+        void UnsubscribeRtcNotifications()
+        {
+            if (!eosInitialized) return;
+
+            try
+            {
+                if (rtcConnectionNotification != 0)
+                {
+                    EOSManager.Instance.GetEOSLobbyInterface().RemoveNotifyRTCRoomConnectionChanged(rtcConnectionNotification);
+                    rtcConnectionNotification = 0;
+                }
+
+                if (rtcParticipantStatusNotification != 0)
+                {
+                    EOSManager.Instance.GetEOSRTCInterface().RemoveNotifyParticipantStatusChanged(rtcParticipantStatusNotification);
+                    rtcParticipantStatusNotification = 0;
+                }
+
+                if (rtcParticipantAudioNotification != 0)
+                {
+                    EOSManager.Instance.GetEOSRTCInterface().GetAudioInterface()
+                        .RemoveNotifyParticipantUpdated(rtcParticipantAudioNotification);
+                    rtcParticipantAudioNotification = 0;
+                }
+            }
+            catch
+            {
+                // Kapanis sirasinda EOS arayuzu artik mevcut olmayabilir.
+            }
+        }
+
+        void HandleLobbyMemberUpdated(ref LobbyMemberUpdateReceivedCallbackInfo data)
+        {
+            if (!IsCurrentLobby((string)data.LobbyId)) return;
+            RefreshParticipants();
+            ApplyReceivingPreferences();
+            RaiseStateChanged();
+        }
+
+        void HandleLobbyMemberStatusChanged(ref LobbyMemberStatusReceivedCallbackInfo data)
+        {
+            if (!IsCurrentLobby((string)data.LobbyId)) return;
+            RefreshParticipants();
+            ApplyReceivingPreferences();
+            RaiseStateChanged();
+        }
+
+        void HandleRtcRoomConnectionChanged(ref RTCRoomConnectionChangedCallbackInfo data)
+        {
+            if (!IsCurrentLobby((string)data.LobbyId) || !IsLocalUser(data.LocalUserId)) return;
+
+            rtcConnected = data.IsConnected;
+            if (!rtcConnected)
+            {
+                pushToTalkActive = false;
+                requestedSendingState = null;
+            }
+            else
+            {
+                ForceDisableSending();
+                RefreshParticipants();
+                ApplyReceivingPreferences();
+            }
+
+            SetStatus(rtcConnected
+                ? "Ses: " + currentChannelLabel
+                : "Ses RTC baglantisi kesildi: " + data.DisconnectReason);
+            RaiseStateChanged();
+        }
+
+        void HandleRtcParticipantStatusChanged(ref ParticipantStatusChangedCallbackInfo data)
+        {
+            if (!IsCurrentRoom((string)data.RoomName)) return;
+
+            string participantId = ProductUserIdToString(data.ParticipantId);
+            if (data.ParticipantStatus == RTCParticipantStatus.Joined)
+            {
+                RefreshParticipants();
+                if (participants.TryGetValue(participantId, out VoiceParticipant participant))
+                {
+                    participant.IsInRoom = true;
+                }
+            }
+            else
+            {
+                participants.Remove(participantId);
+                requestedReceivingState.Remove(participantId);
+            }
+
+            ApplyReceivingPreferences();
+            RaiseStateChanged();
+        }
+
+        void HandleRtcParticipantAudioUpdated(ref ParticipantUpdatedCallbackInfo data)
+        {
+            if (!IsCurrentRoom((string)data.RoomName)) return;
+
+            string participantId = ProductUserIdToString(data.ParticipantId);
+            if (!participants.TryGetValue(participantId, out VoiceParticipant participant))
+            {
+                RefreshParticipants();
+                participants.TryGetValue(participantId, out participant);
+            }
+
+            if (participant == null) return;
+            participant.IsSpeaking = data.Speaking;
+            participant.IsInRoom = true;
+            RaiseStateChanged();
+        }
+
+        void RefreshParticipants()
+        {
+            if (string.IsNullOrEmpty(currentVoiceLobbyId) || localProductUserId == null) return;
+
+            var copyOptions = new CopyLobbyDetailsHandleOptions
+            {
+                LobbyId = currentVoiceLobbyId,
+                LocalUserId = localProductUserId
+            };
+            Result result = EOSManager.Instance.GetEOSLobbyInterface().CopyLobbyDetailsHandle(
+                ref copyOptions,
+                out LobbyDetails details);
+            if (result != Result.Success || details == null) return;
+
+            try
+            {
+                var countOptions = new LobbyDetailsGetMemberCountOptions();
+                uint memberCount = details.GetMemberCount(ref countOptions);
+                var currentIds = new HashSet<string>();
+
+                for (uint index = 0; index < memberCount; index++)
+                {
+                    var memberOptions = new LobbyDetailsGetMemberByIndexOptions { MemberIndex = index };
+                    ProductUserId memberId = details.GetMemberByIndex(ref memberOptions);
+                    if (memberId == null || !memberId.IsValid()) continue;
+
+                    string id = ProductUserIdToString(memberId);
+                    currentIds.Add(id);
+                    if (!participants.TryGetValue(id, out VoiceParticipant participant))
+                    {
+                        participant = new VoiceParticipant
+                        {
+                            ProductUserId = memberId,
+                            Id = id,
+                            IsInRoom = true
+                        };
+                        participants.Add(id, participant);
+                    }
+                    else
+                    {
+                        participant.ProductUserId = memberId;
+                    }
+
+                    string displayName = ReadMemberStringAttribute(details, memberId, DisplayNameAttribute);
+                    participant.DisplayName = string.IsNullOrWhiteSpace(displayName)
+                        ? BuildFallbackDisplayName(id)
+                        : displayName;
+                }
+
+                var removedIds = new List<string>();
+                foreach (string id in participants.Keys)
+                {
+                    if (!currentIds.Contains(id)) removedIds.Add(id);
+                }
+
+                for (int i = 0; i < removedIds.Count; i++)
+                {
+                    participants.Remove(removedIds[i]);
+                    requestedReceivingState.Remove(removedIds[i]);
+                    manuallyMutedParticipants.Remove(removedIds[i]);
+                }
+            }
+            finally
+            {
+                details.Release();
+            }
+        }
+
+        static string ReadMemberStringAttribute(LobbyDetails details, ProductUserId memberId, string key)
+        {
+            var options = new LobbyDetailsCopyMemberAttributeByKeyOptions
+            {
+                TargetUserId = memberId,
+                AttrKey = key
+            };
+            Result result = details.CopyMemberAttributeByKey(
+                ref options,
+                out Epic.OnlineServices.Lobby.Attribute? attribute);
+            if (result != Result.Success || !attribute.HasValue || !attribute.Value.Data.HasValue) return null;
+
+            return attribute.Value.Data.Value.Value.AsUtf8;
         }
 
         void UpdatePushToTalk()
@@ -312,67 +880,110 @@ namespace BriefcaseProtocol.Voice
         void SetPushToTalk(bool active)
         {
             if (pushToTalkActive == active) return;
-
             pushToTalkActive = active;
-            if (vivoxInitialized && VivoxService.Instance.IsLoggedIn)
-            {
-                if (active && !string.IsNullOrEmpty(currentChannel))
-                {
-                    VivoxService.Instance.UnmuteInputDevice();
-                }
-                else
-                {
-                    VivoxService.Instance.MuteInputDevice();
-                }
-            }
-
+            RequestSending(active && IsReady, false);
             RaiseStateChanged();
+        }
+
+        void ForceDisableSending()
+        {
+            pushToTalkActive = false;
+            RequestSending(false, true);
+            RaiseStateChanged();
+        }
+
+        void RequestSending(bool enabled, bool force)
+        {
+            if (!eosInitialized || localProductUserId == null || string.IsNullOrEmpty(currentRtcRoomName)) return;
+            if (!force && requestedSendingState.HasValue && requestedSendingState.Value == enabled) return;
+
+            requestedSendingState = enabled;
+            var options = new UpdateSendingOptions
+            {
+                LocalUserId = localProductUserId,
+                RoomName = currentRtcRoomName,
+                AudioStatus = enabled ? RTCAudioStatus.Enabled : RTCAudioStatus.Disabled
+            };
+            EOSManager.Instance.GetEOSRTCInterface().GetAudioInterface().UpdateSending(
+                ref options,
+                null,
+                (ref UpdateSendingCallbackInfo data) =>
+                {
+                    if (data.ResultCode != Result.Success && data.ResultCode != Result.NoChange)
+                    {
+                        Debug.LogWarning("[VoiceChat/EOS] Mikrofon durumu degistirilemedi: " + data.ResultCode);
+                    }
+                });
         }
 
         void UpdateOutputMuteShortcut()
         {
-            if (!vivoxInitialized || !VivoxService.Instance.IsLoggedIn || Keyboard.current == null) return;
-            if (!Keyboard.current.mKey.wasPressedThisFrame) return;
-
+            if (!IsReady || Keyboard.current == null || !Keyboard.current.mKey.wasPressedThisFrame) return;
             ToggleAllIncomingVoice();
         }
 
         public void ToggleAllIncomingVoice()
         {
-            if (!vivoxInitialized || !VivoxService.Instance.IsLoggedIn) return;
-
-            if (VivoxService.Instance.IsOutputDeviceMuted)
-            {
-                VivoxService.Instance.UnmuteOutputDevice();
-            }
-            else
-            {
-                VivoxService.Instance.MuteOutputDevice();
-            }
-
+            if (!IsReady) return;
+            allIncomingMuted = !allIncomingMuted;
+            requestedReceivingState.Clear();
+            ApplyReceivingPreferences();
             RaiseStateChanged();
         }
 
-        public void ToggleParticipantMute(VivoxParticipant participant)
+        void ToggleParticipantMute(VoiceParticipant participant)
         {
-            if (participant == null || participant.IsSelf) return;
+            if (participant == null || IsLocalUser(participant.ProductUserId)) return;
 
-            if (participant.IsMuted)
+            if (!manuallyMutedParticipants.Add(participant.Id))
             {
-                participant.UnmutePlayerLocally();
-            }
-            else
-            {
-                participant.MutePlayerLocally();
+                manuallyMutedParticipants.Remove(participant.Id);
             }
 
+            requestedReceivingState.Remove(participant.Id);
+            ApplyReceivingPreference(participant);
             RaiseStateChanged();
         }
 
-        bool TryGetTargetChannel(out string channelName, out string channelLabel)
+        void ApplyReceivingPreferences()
         {
-            channelName = null;
-            channelLabel = null;
+            foreach (VoiceParticipant participant in participants.Values)
+            {
+                ApplyReceivingPreference(participant);
+            }
+        }
+
+        void ApplyReceivingPreference(VoiceParticipant participant)
+        {
+            if (!IsReady || participant == null || IsLocalUser(participant.ProductUserId)) return;
+
+            bool shouldReceive = !allIncomingMuted && !manuallyMutedParticipants.Contains(participant.Id);
+            if (requestedReceivingState.TryGetValue(participant.Id, out bool previous) && previous == shouldReceive) return;
+
+            requestedReceivingState[participant.Id] = shouldReceive;
+            var options = new UpdateReceivingOptions
+            {
+                LocalUserId = localProductUserId,
+                RoomName = currentRtcRoomName,
+                ParticipantId = participant.ProductUserId,
+                AudioEnabled = shouldReceive
+            };
+            EOSManager.Instance.GetEOSRTCInterface().GetAudioInterface().UpdateReceiving(
+                ref options,
+                null,
+                (ref UpdateReceivingCallbackInfo data) =>
+                {
+                    if (data.ResultCode != Result.Success && data.ResultCode != Result.NoChange &&
+                        data.ResultCode != Result.NotFound)
+                    {
+                        Debug.LogWarning("[VoiceChat/EOS] Oyuncu ses durumu degistirilemedi: " + data.ResultCode);
+                    }
+                });
+        }
+
+        bool TryGetTarget(out VoiceTarget target)
+        {
+            target = default;
 
             string sceneName = SceneManager.GetActiveScene().name;
             if (sceneName != LobbySceneName && sceneName != GameSceneName) return false;
@@ -387,8 +998,7 @@ namespace BriefcaseProtocol.Voice
             string channelPrefix = "bp-" + SanitizeChannelPart(sessionIdentifier);
             if (sceneName == LobbySceneName)
             {
-                channelName = channelPrefix + "-lobby";
-                channelLabel = "Lobi";
+                target = new VoiceTarget(channelPrefix + "-lobby", "Lobi");
                 return true;
             }
 
@@ -397,15 +1007,13 @@ namespace BriefcaseProtocol.Voice
 
             if (localPlayer.Team.Value == TeamId.TeamA)
             {
-                channelName = channelPrefix + "-team-a";
-                channelLabel = "Takım A";
+                target = new VoiceTarget(channelPrefix + "-team-a", "Takim A");
                 return true;
             }
 
             if (localPlayer.Team.Value == TeamId.TeamB)
             {
-                channelName = channelPrefix + "-team-b";
-                channelLabel = "Takım B";
+                target = new VoiceTarget(channelPrefix + "-team-b", "Takim B");
                 return true;
             }
 
@@ -425,14 +1033,13 @@ namespace BriefcaseProtocol.Voice
                 {
                     ISession session = pair.Value;
                     if (session == null || !session.IsMember) continue;
-
                     currentSession = session;
                     return true;
                 }
             }
             catch (Exception exception)
             {
-                Debug.LogWarning("[VoiceChat] Aktif oturum okunamadı: " + exception.Message);
+                Debug.LogWarning("[VoiceChat/EOS] Aktif oturum okunamadi: " + exception.Message);
             }
 
             return false;
@@ -447,21 +1054,69 @@ namespace BriefcaseProtocol.Voice
                 if (localPlayer != null && !localPlayer.DisplayName.Value.IsEmpty)
                 {
                     string networkName = localPlayer.DisplayName.Value.ToString().Trim();
-                    if (!string.IsNullOrEmpty(networkName)) return LimitDisplayName(networkName);
+                    if (!string.IsNullOrEmpty(networkName)) return LimitUtf8(networkName, 50, "Oyuncu");
                 }
             }
 
-            string playerId = AuthenticationService.Instance.PlayerId;
-            if (string.IsNullOrEmpty(playerId)) return "Oyuncu";
+            try
+            {
+                string playerId = AuthenticationService.Instance.PlayerId;
+                if (!string.IsNullOrEmpty(playerId))
+                {
+                    string suffix = playerId.Length > 6 ? playerId.Substring(playerId.Length - 6) : playerId;
+                    return "Oyuncu-" + suffix;
+                }
+            }
+            catch
+            {
+                // Unity Authentication henuz hazir degilse EOS kimligi kullanilir.
+            }
 
-            string suffix = playerId.Length > 6 ? playerId.Substring(playerId.Length - 6) : playerId;
+            string eosId = ProductUserIdToString(localProductUserId);
+            return BuildFallbackDisplayName(eosId);
+        }
+
+        static string BuildFallbackDisplayName(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return "Oyuncu";
+            string suffix = id.Length > 6 ? id.Substring(id.Length - 6) : id;
             return "Oyuncu-" + suffix;
         }
 
-        static string LimitDisplayName(string displayName)
+        static string ProductUserIdToString(ProductUserId productUserId)
         {
-            const int maxLength = 50;
-            return displayName.Length <= maxLength ? displayName : displayName.Substring(0, maxLength);
+            return productUserId == null ? string.Empty : productUserId.ToString();
+        }
+
+        bool IsLocalUser(ProductUserId productUserId)
+        {
+            return string.Equals(
+                ProductUserIdToString(productUserId),
+                ProductUserIdToString(localProductUserId),
+                StringComparison.Ordinal);
+        }
+
+        bool IsCurrentLobby(string lobbyId)
+        {
+            return !string.IsNullOrEmpty(currentVoiceLobbyId) &&
+                   string.Equals(currentVoiceLobbyId, lobbyId, StringComparison.Ordinal);
+        }
+
+        bool IsCurrentRoom(string roomName)
+        {
+            return !string.IsNullOrEmpty(currentRtcRoomName) &&
+                   string.Equals(currentRtcRoomName, roomName, StringComparison.Ordinal);
+        }
+
+        static string BuildDeterministicLobbyId(string channelName)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(channelName));
+                var builder = new StringBuilder("bpv-");
+                for (int i = 0; i < 26; i++) builder.Append(hash[i].ToString("x2"));
+                return builder.ToString();
+            }
         }
 
         static string SanitizeChannelPart(string value)
@@ -470,24 +1125,40 @@ namespace BriefcaseProtocol.Voice
             for (int i = 0; i < value.Length && builder.Length < 80; i++)
             {
                 char character = char.ToLowerInvariant(value[i]);
-                if (char.IsLetterOrDigit(character) || character == '-')
-                {
-                    builder.Append(character);
-                }
-                else
-                {
-                    builder.Append('-');
-                }
+                builder.Append(char.IsLetterOrDigit(character) || character == '-' ? character : '-');
             }
 
             return builder.Length > 0 ? builder.ToString() : "session";
+        }
+
+        static string LimitUtf8(string value, int maxLength, string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return fallback;
+            string trimmed = value.Trim();
+            return trimmed.Length <= maxLength ? trimmed : trimmed.Substring(0, maxLength);
         }
 
         static string FriendlyError(Exception exception)
         {
             string message = exception.GetBaseException().Message;
             if (string.IsNullOrWhiteSpace(message)) return exception.GetType().Name;
-            return message.Length <= 120 ? message : message.Substring(0, 120) + "…";
+            return message.Length <= 140 ? message : message.Substring(0, 140) + "...";
+        }
+
+        static async Task<T> AwaitWithTimeout<T>(Task<T> task, string operationName)
+        {
+            Task completed = await Task.WhenAny(task, Task.Delay(OperationTimeoutMilliseconds));
+            if (completed != task) throw new TimeoutException(operationName + " zaman asimina ugradi");
+            return await task;
+        }
+
+        static async Task<bool> EnsureMicrophonePermissionAsync()
+        {
+            if (Application.HasUserAuthorization(UserAuthorization.Microphone)) return true;
+
+            AsyncOperation request = Application.RequestUserAuthorization(UserAuthorization.Microphone);
+            while (!request.isDone) await Task.Yield();
+            return Application.HasUserAuthorization(UserAuthorization.Microphone);
         }
 
         bool IsVoiceScene()
@@ -496,135 +1167,12 @@ namespace BriefcaseProtocol.Voice
             return sceneName == LobbySceneName || sceneName == GameSceneName;
         }
 
-        void SubscribeVivoxEvents()
-        {
-            if (eventsSubscribed) return;
-
-            VivoxService.Instance.ChannelJoined += HandleChannelJoined;
-            VivoxService.Instance.ChannelLeft += HandleChannelLeft;
-            VivoxService.Instance.LoggedOut += HandleLoggedOut;
-            VivoxService.Instance.ParticipantAddedToChannel += HandleParticipantAdded;
-            VivoxService.Instance.ParticipantRemovedFromChannel += HandleParticipantRemoved;
-            eventsSubscribed = true;
-        }
-
-        void UnsubscribeVivoxEvents()
-        {
-            if (!eventsSubscribed) return;
-
-            VivoxService.Instance.ChannelJoined -= HandleChannelJoined;
-            VivoxService.Instance.ChannelLeft -= HandleChannelLeft;
-            VivoxService.Instance.LoggedOut -= HandleLoggedOut;
-            VivoxService.Instance.ParticipantAddedToChannel -= HandleParticipantAdded;
-            VivoxService.Instance.ParticipantRemovedFromChannel -= HandleParticipantRemoved;
-            ClearObservedParticipants();
-            eventsSubscribed = false;
-        }
-
-        void HandleChannelJoined(string channelName)
-        {
-            if (!string.Equals(channelName, currentChannel, StringComparison.Ordinal) && string.IsNullOrEmpty(currentChannel))
-            {
-                currentChannel = channelName;
-            }
-
-            ObserveCurrentParticipants();
-            RaiseStateChanged();
-        }
-
-        void HandleChannelLeft(string channelName)
-        {
-            if (string.Equals(channelName, currentChannel, StringComparison.Ordinal))
-            {
-                currentChannel = null;
-                currentChannelLabel = null;
-            }
-
-            ClearObservedParticipants();
-            RaiseStateChanged();
-        }
-
-        void HandleLoggedOut()
-        {
-            currentChannel = null;
-            currentChannelLabel = null;
-            pushToTalkActive = false;
-            ClearObservedParticipants();
-            RaiseStateChanged();
-        }
-
-        void HandleParticipantAdded(VivoxParticipant participant)
-        {
-            ObserveParticipant(participant);
-            RaiseStateChanged();
-        }
-
-        void HandleParticipantRemoved(VivoxParticipant participant)
-        {
-            StopObservingParticipant(participant);
-            RaiseStateChanged();
-        }
-
-        void ObserveCurrentParticipants()
-        {
-            if (string.IsNullOrEmpty(currentChannel) ||
-                !VivoxService.Instance.ActiveChannels.TryGetValue(currentChannel, out var participants)) return;
-
-            for (int i = 0; i < participants.Count; i++)
-            {
-                ObserveParticipant(participants[i]);
-            }
-        }
-
-        void ObserveParticipant(VivoxParticipant participant)
-        {
-            if (participant == null || !observedParticipants.Add(participant)) return;
-
-            participant.ParticipantSpeechDetected += RaiseStateChanged;
-            participant.ParticipantMuteStateChanged += RaiseStateChanged;
-        }
-
-        void StopObservingParticipant(VivoxParticipant participant)
-        {
-            if (participant == null || !observedParticipants.Remove(participant)) return;
-
-            participant.ParticipantSpeechDetected -= RaiseStateChanged;
-            participant.ParticipantMuteStateChanged -= RaiseStateChanged;
-        }
-
-        void ClearObservedParticipants()
-        {
-            foreach (VivoxParticipant participant in observedParticipants)
-            {
-                if (participant == null) continue;
-                participant.ParticipantSpeechDetected -= RaiseStateChanged;
-                participant.ParticipantMuteStateChanged -= RaiseStateChanged;
-            }
-
-            observedParticipants.Clear();
-        }
-
-        List<VivoxParticipant> GetParticipantsSnapshot()
-        {
-            var snapshot = new List<VivoxParticipant>();
-            if (!vivoxInitialized || string.IsNullOrEmpty(currentChannel) ||
-                !VivoxService.Instance.ActiveChannels.TryGetValue(currentChannel, out var participants)) return snapshot;
-
-            for (int i = 0; i < participants.Count; i++)
-            {
-                if (participants[i] != null) snapshot.Add(participants[i]);
-            }
-
-            return snapshot;
-        }
-
         void DrawVoiceOverlay()
         {
-            List<VivoxParticipant> participants = GetParticipantsSnapshot();
             int remoteParticipantCount = 0;
-            for (int i = 0; i < participants.Count; i++)
+            foreach (VoiceParticipant participant in participants.Values)
             {
-                if (!participants[i].IsSelf) remoteParticipantCount++;
+                if (!IsLocalUser(participant.ProductUserId)) remoteParticipantCount++;
             }
 
             float panelHeight = 130f + remoteParticipantCount * 30f;
@@ -635,23 +1183,22 @@ namespace BriefcaseProtocol.Voice
 
             if (IsReady)
             {
-                GUILayout.Label(pushToTalkActive ? "V: KONUŞUYORSUN" : "V basılı tut: konuş");
-                bool outputMuted = VivoxService.Instance.IsOutputDeviceMuted;
-                if (GUILayout.Button(outputMuted ? "M: Tüm sesleri aç" : "M: Tüm sesleri kapat"))
+                GUILayout.Label(pushToTalkActive ? "V: KONUSUYORSUN" : "V basili tut: konus");
+                if (GUILayout.Button(allIncomingMuted ? "M: Tum sesleri ac" : "M: Tum sesleri kapat"))
                 {
                     ToggleAllIncomingVoice();
                 }
             }
 
-            for (int i = 0; i < participants.Count; i++)
+            foreach (VoiceParticipant participant in participants.Values)
             {
-                VivoxParticipant participant = participants[i];
-                if (participant.IsSelf) continue;
+                if (IsLocalUser(participant.ProductUserId)) continue;
 
                 GUILayout.BeginHorizontal();
-                string speakingMarker = participant.SpeechDetected ? "● " : "○ ";
-                GUILayout.Label(speakingMarker + participant.DisplayName, GUILayout.ExpandWidth(true));
-                if (GUILayout.Button(participant.IsMuted ? "Sesi aç" : "Sustur", GUILayout.Width(72f)))
+                GUILayout.Label((participant.IsSpeaking ? "● " : "○ ") + participant.DisplayName,
+                    GUILayout.ExpandWidth(true));
+                bool isMuted = manuallyMutedParticipants.Contains(participant.Id);
+                if (GUILayout.Button(isMuted ? "Sesi ac" : "Sustur", GUILayout.Width(72f)))
                 {
                     ToggleParticipantMute(participant);
                 }
