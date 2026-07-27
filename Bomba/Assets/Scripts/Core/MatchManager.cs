@@ -147,10 +147,11 @@ namespace BriefcaseProtocol.Core
         {
             if (!IsServer) return;
 
-            TeamId[] teams = { TeamId.TeamA, TeamId.TeamA, TeamId.TeamB, TeamId.TeamB };
-            RoleSlot[] slots = { RoleSlot.Operator, RoleSlot.Support, RoleSlot.Operator, RoleSlot.Support };
+            TeamId[] teams = { TeamId.TeamA, TeamId.TeamB, TeamId.TeamA, TeamId.TeamB };
+            RoleSlot[] slots = { RoleSlot.Operator, RoleSlot.Operator, RoleSlot.Support, RoleSlot.Support };
 
-            var players = NetworkPlayerState.All;
+            var players = new System.Collections.Generic.List<NetworkPlayerState>(NetworkPlayerState.All);
+            players.Sort((left, right) => left.OwnerClientId.CompareTo(right.OwnerClientId));
             int index = 0;
 
             for (int i = 0; i < players.Count && index < teams.Length; i++)
