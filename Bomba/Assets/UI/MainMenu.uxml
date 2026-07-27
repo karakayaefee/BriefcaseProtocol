@@ -1,0 +1,82 @@
+<engine:UXML xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:engine="UnityEngine.UIElements" xmlns:editor="UnityEditor.UIElements" editor-extension-mode="False">
+    <engine:VisualElement name="menu-root" style="flex-grow: 1; align-items: center; justify-content: center;">
+
+        <!-- ============ GIRIS EKRANI ============ -->
+        <engine:VisualElement name="panel-main" class="blocks-modal">
+            <engine:Label text="BRIEFCASE PROTOCOL" class="blocks-header blocks-header--space-bottom" />
+            <engine:Label text="Bir canta gercek. Digerleri yalan." class="blocks-label blocks-element--space-bottom" />
+            <engine:Button name="btn-host" text="Lobi Kur" class="blocks-element--space-bottom" />
+            <engine:Button name="btn-join" text="Lobiye Katil" class="blocks-element--space-bottom" />
+            <engine:Button name="btn-quit" text="Cikis" />
+        </engine:VisualElement>
+
+        <!-- ============ LOBI KUR ============ -->
+        <engine:VisualElement name="panel-host" class="blocks-modal" style="display: none;">
+            <engine:Label text="LOBI KUR" class="blocks-header blocks-header--sm blocks-header--space-bottom" />
+            <Blocks.Sessions.CreateSessionElement class="blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionSettings" binding-mode="ToTarget" data-source-path="" />
+                </Bindings>
+            </Blocks.Sessions.CreateSessionElement>
+            <engine:VisualElement class="blocks-container--horizontal blocks-container--space-between blocks-element--space-bottom">
+                <Blocks.Sessions.Common.PlayerCountLabel>
+                    <Bindings>
+                        <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                    </Bindings>
+                </Blocks.Sessions.Common.PlayerCountLabel>
+                <Blocks.Sessions.Common.CopySessionCodeElement class="blocks-copy-session--header">
+                    <Bindings>
+                        <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                    </Bindings>
+                </Blocks.Sessions.Common.CopySessionCodeElement>
+            </engine:VisualElement>
+            <Blocks.Sessions.Common.PlayerListViewElement class="blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                </Bindings>
+            </Blocks.Sessions.Common.PlayerListViewElement>
+            <Blocks.Sessions.Common.SessionStatusLabel class="blocks-label blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                </Bindings>
+            </Blocks.Sessions.Common.SessionStatusLabel>
+            <engine:VisualElement class="blocks-container--horizontal blocks-container--space-between">
+                <Blocks.Sessions.Common.LeaveSessionButton>
+                    <Bindings>
+                        <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                    </Bindings>
+                </Blocks.Sessions.Common.LeaveSessionButton>
+                <engine:Button name="btn-back-host" text="Geri" />
+            </engine:VisualElement>
+        </engine:VisualElement>
+
+        <!-- ============ LOBIYE KATIL ============ -->
+        <engine:VisualElement name="panel-join" class="blocks-modal" style="display: none;">
+            <engine:Label text="LOBIYE KATIL" class="blocks-header blocks-header--sm blocks-header--space-bottom" />
+            <Blocks.Sessions.JoinSessionByCode class="blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionSettings" binding-mode="ToTarget" data-source-path="" />
+                </Bindings>
+            </Blocks.Sessions.JoinSessionByCode>
+            <Blocks.Sessions.Common.PlayerListViewElement class="blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                </Bindings>
+            </Blocks.Sessions.Common.PlayerListViewElement>
+            <Blocks.Sessions.Common.SessionStatusLabel class="blocks-label blocks-element--space-bottom">
+                <Bindings>
+                    <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                </Bindings>
+            </Blocks.Sessions.Common.SessionStatusLabel>
+            <engine:VisualElement class="blocks-container--horizontal blocks-container--space-between">
+                <Blocks.Sessions.Common.LeaveSessionButton>
+                    <Bindings>
+                        <engine:DataBinding property="SessionType" binding-mode="ToTarget" data-source-path="sessionType" />
+                    </Bindings>
+                </Blocks.Sessions.Common.LeaveSessionButton>
+                <engine:Button name="btn-back-join" text="Geri" />
+            </engine:VisualElement>
+        </engine:VisualElement>
+
+    </engine:VisualElement>
+</engine:UXML>
