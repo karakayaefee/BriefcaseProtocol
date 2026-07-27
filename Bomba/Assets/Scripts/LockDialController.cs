@@ -19,6 +19,7 @@ public sealed class LockDialController : MonoBehaviour
     private float animationElapsed;
     private int targetValue;
     private bool initialized;
+    private bool awaitingNetworkValue;
 
     public int CurrentValue => currentValue;
     public float StepAngle => stepAngle;
@@ -30,6 +31,7 @@ public sealed class LockDialController : MonoBehaviour
     public bool CanAcceptInput =>
         initialized &&
         !IsAnimating &&
+        !awaitingNetworkValue &&
         lockController != null &&
         lockController.CanAdjustDials;
 
@@ -83,6 +85,7 @@ public sealed class LockDialController : MonoBehaviour
         dialTransform.localRotation = animationTargetRotation;
         currentValue = targetValue;
         IsAnimating = false;
+        awaitingNetworkValue = false;
     }
 
     private void OnValidate()
@@ -120,19 +123,42 @@ public sealed class LockDialController : MonoBehaviour
             return false;
         }
 
-        targetValue = WrapDigit(currentValue + valueDelta);
+        if (lockController != null)
+        {
+            awaitingNetworkValue = true;
+            if (lockController.TryHandleDialInput(this, valueDelta))
+            {
+                return true;
+            }
+
+            awaitingNetworkValue = false;
+        }
+
+        ApplyNetworkValue(WrapDigit(currentValue + valueDelta), true);
+        return true;
+    }
+
+    public void ApplyNetworkValue(int value, bool animate)
+    {
+        Initialize();
+        awaitingNetworkValue = false;
+        int wrappedValue = WrapDigit(value);
+        if (!IsAnimating && currentValue == wrappedValue)
+        {
+            return;
+        }
+
+        targetValue = wrappedValue;
         animationElapsed = 0f;
         animationStartRotation = dialTransform.localRotation;
         animationTargetRotation = GetRotationForValue(targetValue);
-        IsAnimating = true;
+        IsAnimating = animate && rotationDuration > 0f;
 
-        if (rotationDuration <= 0f)
+        if (!IsAnimating)
         {
             dialTransform.localRotation = animationTargetRotation;
             CompleteStep();
         }
-
-        return true;
     }
 
     private void Initialize()

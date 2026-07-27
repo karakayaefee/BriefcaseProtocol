@@ -1,9 +1,14 @@
+using System.Collections;
+using System.Collections.Generic;
+using BriefcaseProtocol.Core;
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
 [DisallowMultipleComponent]
 [RequireComponent(typeof(CharacterController))]
-public sealed class FirstPersonCharacterController : MonoBehaviour
+public sealed class FirstPersonCharacterController : NetworkBehaviour
 {
     [Header("Movement")]
     [SerializeField, Min(0f)] private float walkSpeed = 4.5f;
@@ -93,6 +98,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private bool[] modelRendererDefaultStates = System.Array.Empty<bool>();
     private RuntimeAnimatorController cachedAnimatorController;
     private Texture2D crosshairTexture;
+    private Camera playerCamera;
+    private AudioListener playerAudioListener;
+    private Coroutine spawnRoutine;
     private Vector3 cameraNeutralLocalPosition;
     private Vector3 currentBobOffset;
     private float verticalVelocity;
@@ -113,6 +121,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
     private bool hasSprintingParameter;
     private bool hasThirdPersonParameter;
     private bool hasJumpParameter;
+    private bool hasLocalControl;
+    private bool spawnReady = true;
+    private bool sceneLoadSubscribed;
 
     public bool IsCrouching => isCrouching;
     public bool IsThirdPerson => isThirdPerson;
@@ -138,6 +149,12 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
             cameraTransform = childCamera != null ? childCamera.transform : null;
         }
 
+        if (cameraTransform != null)
+        {
+            playerCamera = cameraTransform.GetComponent<Camera>();
+            playerAudioListener = cameraTransform.GetComponent<AudioListener>();
+        }
+
         ConfigureAnimationModel();
 
         if (cameraPivot != null)
@@ -149,30 +166,50 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         CreateInputActions();
         CreateCrosshairTexture();
         ApplyStanceInstantly(false);
+        RefreshLocalControlState();
     }
 
     private void OnEnable()
     {
-        moveAction?.Enable();
-        lookAction?.Enable();
-        jumpAction?.Enable();
-        crouchAction?.Enable();
-        sprintAction?.Enable();
-        cameraModeAction?.Enable();
-        interactAction?.Enable();
-        inspectAction?.Enable();
-        inspectRotateAction?.Enable();
-        inspectZoomAction?.Enable();
+        RefreshLocalControlState();
     }
 
     private void Start()
     {
-        LockCursor();
+        if (hasLocalControl)
+        {
+            LockCursor();
+        }
+    }
+
+    public override void OnNetworkSpawn()
+    {
+        if (IsOwner)
+        {
+            spawnReady = false;
+        }
+
+        RefreshLocalControlState();
+
+        if (!IsOwner)
+        {
+            return;
+        }
+
+        SubscribeToSceneLoads();
+        ScheduleSpawn(SceneManager.GetActiveScene());
+    }
+
+    public override void OnNetworkDespawn()
+    {
+        CancelScheduledSpawn();
+        UnsubscribeFromSceneLoads();
+        ApplyLocalControlState(false);
     }
 
     private void OnApplicationFocus(bool hasFocus)
     {
-        if (hasFocus && isActiveAndEnabled && Application.isPlaying)
+        if (hasLocalControl && hasFocus && isActiveAndEnabled && Application.isPlaying)
         {
             if (activeInspectable != null)
             {
@@ -187,6 +224,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void Update()
     {
+        if (!hasLocalControl || !spawnReady)
+        {
+            return;
+        }
+
         ValidateActiveInspectionState();
         HandleCursorState();
         UpdateCameraModeInput();
@@ -203,18 +245,9 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void OnDisable()
     {
-        moveAction?.Disable();
-        lookAction?.Disable();
-        jumpAction?.Disable();
-        crouchAction?.Disable();
-        sprintAction?.Disable();
-        cameraModeAction?.Disable();
-        interactAction?.Disable();
-        inspectAction?.Disable();
-        inspectRotateAction?.Disable();
-        inspectZoomAction?.Disable();
+        SetInputActionsEnabled(false);
 
-        if (Application.isPlaying)
+        if (hasLocalControl && Application.isPlaying)
         {
             if (activeInspectionPointerInteraction != null)
             {
@@ -234,8 +267,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         }
     }
 
-    private void OnDestroy()
+    public override void OnDestroy()
     {
+        CancelScheduledSpawn();
+        UnsubscribeFromSceneLoads();
+
         moveAction?.Dispose();
         lookAction?.Dispose();
         jumpAction?.Dispose();
@@ -251,6 +287,8 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         {
             Destroy(crosshairTexture);
         }
+
+        base.OnDestroy();
     }
 
     public void SetPrefabReferences(
@@ -501,7 +539,8 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void OnGUI()
     {
-        if (!showCrosshair || crosshairTexture == null || activeInspectable != null)
+        if (!hasLocalControl || !showCrosshair || crosshairTexture == null ||
+            activeInspectable != null)
         {
             return;
         }
@@ -876,6 +915,11 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         }
 
         cachedAnimatorController = characterAnimator.runtimeAnimatorController;
+        if (cachedAnimatorController == null)
+        {
+            return;
+        }
+
         foreach (AnimatorControllerParameter parameter in characterAnimator.parameters)
         {
             int hash = parameter.nameHash;
@@ -912,7 +956,7 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
 
     private void UpdateModelVisibility(bool force)
     {
-        bool shouldShowModel = showModelInFirstPerson || isThirdPerson;
+        bool shouldShowModel = !hasLocalControl || showModelInFirstPerson || isThirdPerson;
         if (!force && modelVisibilityInitialized && modelIsVisible == shouldShowModel)
         {
             return;
@@ -1078,5 +1122,198 @@ public sealed class FirstPersonCharacterController : MonoBehaviour
         activeInspectable = null;
         inspectable.ToggleInspection(cameraTransform);
         LockCursor();
+    }
+
+    private void RefreshLocalControlState()
+    {
+        Unity.Netcode.NetworkManager manager = Unity.Netcode.NetworkManager.Singleton;
+        bool networkSessionActive = manager != null && manager.IsListening;
+        if (!networkSessionActive)
+        {
+            spawnReady = true;
+        }
+
+        bool shouldHaveLocalControl = !networkSessionActive || (IsSpawned && IsOwner);
+        ApplyLocalControlState(shouldHaveLocalControl);
+    }
+
+    private void ApplyLocalControlState(bool shouldHaveLocalControl)
+    {
+        hasLocalControl = shouldHaveLocalControl;
+        bool gameplayComponentsEnabled = hasLocalControl && spawnReady;
+
+        if (playerCamera != null)
+        {
+            playerCamera.enabled = gameplayComponentsEnabled;
+        }
+
+        if (playerAudioListener != null)
+        {
+            playerAudioListener.enabled = gameplayComponentsEnabled;
+        }
+
+        if (characterController != null)
+        {
+            characterController.enabled = gameplayComponentsEnabled;
+        }
+
+        SetInputActionsEnabled(gameplayComponentsEnabled && isActiveAndEnabled);
+        modelVisibilityInitialized = false;
+        UpdateModelVisibility(true);
+    }
+
+    private void SetInputActionsEnabled(bool inputEnabled)
+    {
+        InputAction[] actions =
+        {
+            moveAction,
+            lookAction,
+            jumpAction,
+            crouchAction,
+            sprintAction,
+            cameraModeAction,
+            interactAction,
+            inspectAction,
+            inspectRotateAction,
+            inspectZoomAction
+        };
+
+        for (int i = 0; i < actions.Length; i++)
+        {
+            if (inputEnabled)
+            {
+                actions[i]?.Enable();
+            }
+            else
+            {
+                actions[i]?.Disable();
+            }
+        }
+    }
+
+    private void SubscribeToSceneLoads()
+    {
+        if (sceneLoadSubscribed)
+        {
+            return;
+        }
+
+        SceneManager.sceneLoaded += HandleSceneLoaded;
+        sceneLoadSubscribed = true;
+    }
+
+    private void UnsubscribeFromSceneLoads()
+    {
+        if (!sceneLoadSubscribed)
+        {
+            return;
+        }
+
+        SceneManager.sceneLoaded -= HandleSceneLoaded;
+        sceneLoadSubscribed = false;
+    }
+
+    private void HandleSceneLoaded(Scene scene, LoadSceneMode loadMode)
+    {
+        ScheduleSpawn(scene);
+    }
+
+    private void ScheduleSpawn(Scene scene)
+    {
+        if (!hasLocalControl || !IsSpawned || !IsOwner || !scene.isLoaded)
+        {
+            return;
+        }
+
+        CancelScheduledSpawn();
+        spawnReady = false;
+        ApplyLocalControlState(true);
+
+        if (TryMoveToSceneSpawnPoint(scene))
+        {
+            CompleteSpawn();
+            return;
+        }
+
+        spawnRoutine = StartCoroutine(MoveToSceneSpawnPoint(scene));
+    }
+
+    private IEnumerator MoveToSceneSpawnPoint(Scene scene)
+    {
+        const int maxFrameWait = 120;
+        for (int frame = 0; frame < maxFrameWait; frame++)
+        {
+            yield return null;
+
+            if (!hasLocalControl || !IsSpawned || !IsOwner || !scene.isLoaded)
+            {
+                spawnRoutine = null;
+                yield break;
+            }
+
+            if (TryMoveToSceneSpawnPoint(scene))
+            {
+                CompleteSpawn();
+                yield break;
+            }
+        }
+
+        Debug.LogWarning(
+            $"[PlayerSpawn] {scene.name} sahnesinde NetworkSpawnPoint bulunamadı; oyuncu kontrolü güvenlik için kapalı kaldı.",
+            this);
+        spawnRoutine = null;
+    }
+
+    private bool TryMoveToSceneSpawnPoint(Scene scene)
+    {
+        NetworkSpawnPoint[] allPoints =
+            FindObjectsByType<NetworkSpawnPoint>(FindObjectsInactive.Exclude);
+        List<NetworkSpawnPoint> scenePoints = new List<NetworkSpawnPoint>();
+        for (int i = 0; i < allPoints.Length; i++)
+        {
+            if (allPoints[i] != null && allPoints[i].gameObject.scene == scene)
+            {
+                scenePoints.Add(allPoints[i]);
+            }
+        }
+
+        scenePoints.Sort(NetworkSpawnPoint.Compare);
+        if (scenePoints.Count == 0)
+        {
+            return false;
+        }
+
+        int pointIndex = (int)(OwnerClientId % (ulong)scenePoints.Count);
+        Transform point = scenePoints[pointIndex].transform;
+        transform.SetPositionAndRotation(point.position, point.rotation);
+        verticalVelocity = 0f;
+        pitch = 0f;
+        if (cameraPivot != null)
+        {
+            cameraPivot.localRotation = Quaternion.identity;
+        }
+
+        Debug.Log(
+            $"[PlayerSpawn] Client {OwnerClientId} -> {scene.name}/{point.name} @ {point.position}",
+            this);
+        return true;
+    }
+
+    private void CompleteSpawn()
+    {
+        spawnReady = true;
+        ApplyLocalControlState(true);
+        spawnRoutine = null;
+    }
+
+    private void CancelScheduledSpawn()
+    {
+        if (spawnRoutine == null)
+        {
+            return;
+        }
+
+        StopCoroutine(spawnRoutine);
+        spawnRoutine = null;
     }
 }

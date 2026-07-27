@@ -1,3 +1,4 @@
+using BriefcaseProtocol.Core;
 using UnityEngine;
 
 public interface IPlayerInteractable
@@ -53,10 +54,13 @@ public sealed class BriefcaseInteractable : MonoBehaviour, IPlayerInteractable, 
     private bool isReturningFromInspection;
     private bool isDetailInspecting;
     private bool isInspectionTransitioning;
+    private BriefcaseNetworkState networkState;
 
     public bool IsInspectionActive => isInspecting;
     public bool IsDetailInspectionActive => isDetailInspecting;
-    public bool IsOpen => targetOpen;
+    public bool IsOpen => networkState != null && networkState.IsSpawned
+        ? networkState.IsOpen.Value
+        : targetOpen;
     public bool IsInteractionAnimating =>
         isAnimating || isReturningFromInspection || isInspectionTransitioning;
 
@@ -85,6 +89,18 @@ public sealed class BriefcaseInteractable : MonoBehaviour, IPlayerInteractable, 
 
             animator.enabled = false;
         }
+    }
+
+    private void OnEnable()
+    {
+        BriefcaseNetworkState.InstanceChanged += HandleNetworkStateInstanceChanged;
+        BindNetworkState(BriefcaseNetworkState.Instance);
+    }
+
+    private void OnDisable()
+    {
+        BriefcaseNetworkState.InstanceChanged -= HandleNetworkStateInstanceChanged;
+        BindNetworkState(null);
     }
 
     private void Update()
@@ -173,9 +189,25 @@ public sealed class BriefcaseInteractable : MonoBehaviour, IPlayerInteractable, 
             return;
         }
 
-        if (!targetOpen && lockController != null && !lockController.IsUnlocked)
+        if (!IsOpen && lockController != null && !lockController.IsUnlocked)
         {
             lockController.NotifyLockedOpenAttempt();
+            return;
+        }
+
+        if (networkState != null && networkState.IsSpawned)
+        {
+            networkState.RequestToggleOpen();
+            return;
+        }
+
+        BeginOpenTransition(!targetOpen, false);
+    }
+
+    private void BeginOpenTransition(bool shouldOpen, bool immediate)
+    {
+        if (animator == null)
+        {
             return;
         }
 
@@ -189,9 +221,18 @@ public sealed class BriefcaseInteractable : MonoBehaviour, IPlayerInteractable, 
             return;
         }
 
-        targetOpen = !targetOpen;
-        isAnimating = true;
+        targetOpen = shouldOpen;
         animator.speed = 0f;
+
+        if (immediate)
+        {
+            normalizedProgress = targetOpen ? 1f : 0f;
+            isAnimating = false;
+            SampleAnimation();
+            return;
+        }
+
+        isAnimating = true;
         SampleAnimation();
     }
 
@@ -359,6 +400,44 @@ public sealed class BriefcaseInteractable : MonoBehaviour, IPlayerInteractable, 
     {
         return Vector3.SqrMagnitude(transform.position - targetPosition) <= 0.000001f &&
             Quaternion.Angle(transform.rotation, targetRotation) <= 0.05f;
+    }
+
+    private void HandleNetworkStateInstanceChanged(BriefcaseNetworkState state)
+    {
+        BindNetworkState(state);
+    }
+
+    private void BindNetworkState(BriefcaseNetworkState state)
+    {
+        if (networkState == state)
+        {
+            return;
+        }
+
+        if (networkState != null)
+        {
+            networkState.StateChanged -= HandleNetworkStateChanged;
+        }
+
+        networkState = state;
+        if (networkState == null || !networkState.IsSpawned)
+        {
+            return;
+        }
+
+        networkState.StateChanged += HandleNetworkStateChanged;
+        BeginOpenTransition(networkState.IsOpen.Value, true);
+    }
+
+    private void HandleNetworkStateChanged()
+    {
+        if (networkState == null || !networkState.IsSpawned ||
+            targetOpen == networkState.IsOpen.Value)
+        {
+            return;
+        }
+
+        BeginOpenTransition(networkState.IsOpen.Value, false);
     }
 
     private void EnsureInteractionCollider()

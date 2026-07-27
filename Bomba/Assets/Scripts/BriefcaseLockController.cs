@@ -1,3 +1,4 @@
+using BriefcaseProtocol.Core;
 using UnityEngine;
 
 public interface IInspectionPointerInteractable
@@ -39,6 +40,7 @@ public sealed class BriefcaseLockController : MonoBehaviour, IInspectionPointerI
     private float lockedFeedbackUntil;
     private float incorrectCombinationFeedbackUntil;
     private int inspectionEnteredFrame;
+    private BriefcaseNetworkState networkState;
 
     public bool IsUnlocked { get; private set; }
     public bool IsInspectionInteractionActive { get; private set; }
@@ -64,8 +66,17 @@ public sealed class BriefcaseLockController : MonoBehaviour, IInspectionPointerI
         dial3?.SetLockController(this);
     }
 
+    private void OnEnable()
+    {
+        BriefcaseNetworkState.InstanceChanged += HandleNetworkStateInstanceChanged;
+        BindNetworkState(BriefcaseNetworkState.Instance);
+    }
+
     private void OnDisable()
     {
+        BriefcaseNetworkState.InstanceChanged -= HandleNetworkStateInstanceChanged;
+        BindNetworkState(null);
+
         if (IsInspectionInteractionActive)
         {
             ExitInspectionInteraction();
@@ -170,6 +181,24 @@ public sealed class BriefcaseLockController : MonoBehaviour, IInspectionPointerI
         Log($"Current combination: {GetCombinationText()}.");
     }
 
+    public bool TryHandleDialInput(LockDialController changedDial, int valueDelta)
+    {
+        if (networkState == null || !networkState.IsSpawned || changedDial == null)
+        {
+            return false;
+        }
+
+        int dialIndex = changedDial == dial1 ? 0 : changedDial == dial2 ? 1 :
+            changedDial == dial3 ? 2 : -1;
+        if (dialIndex < 0)
+        {
+            return false;
+        }
+
+        networkState.RequestDialStep(dialIndex, valueDelta);
+        return true;
+    }
+
     public void NotifyLockedOpenAttempt()
     {
         lockedFeedbackUntil = Time.unscaledTime + 1.25f;
@@ -196,6 +225,13 @@ public sealed class BriefcaseLockController : MonoBehaviour, IInspectionPointerI
         {
             incorrectCombinationFeedbackUntil = Time.unscaledTime + 1.25f;
             Log("Incorrect combination. Briefcase remains locked.");
+            return;
+        }
+
+        if (networkState != null && networkState.IsSpawned)
+        {
+            networkState.RequestUnlock();
+            ExitInspectionInteraction();
             return;
         }
 
@@ -340,6 +376,64 @@ public sealed class BriefcaseLockController : MonoBehaviour, IInspectionPointerI
         dial1 ??= FindDial("Dial_01_L");
         dial2 ??= FindDial("Dial_02_L");
         dial3 ??= FindDial("Dial_03_L");
+    }
+
+    private void HandleNetworkStateInstanceChanged(BriefcaseNetworkState state)
+    {
+        BindNetworkState(state);
+    }
+
+    private void BindNetworkState(BriefcaseNetworkState state)
+    {
+        if (networkState == state)
+        {
+            return;
+        }
+
+        if (networkState != null)
+        {
+            networkState.StateChanged -= HandleNetworkStateChanged;
+        }
+
+        networkState = state;
+        if (networkState == null || !networkState.IsSpawned)
+        {
+            return;
+        }
+
+        networkState.StateChanged += HandleNetworkStateChanged;
+        ApplyNetworkState(true);
+    }
+
+    private void HandleNetworkStateChanged()
+    {
+        ApplyNetworkState(false);
+    }
+
+    private void ApplyNetworkState(bool immediate)
+    {
+        if (networkState == null || !networkState.IsSpawned)
+        {
+            return;
+        }
+
+        bool wasUnlocked = IsUnlocked;
+        IsUnlocked = networkState.IsUnlocked.Value;
+        dial1?.ApplyNetworkValue(networkState.Digit1.Value, !immediate);
+        dial2?.ApplyNetworkValue(networkState.Digit2.Value, !immediate);
+        dial3?.ApplyNetworkValue(networkState.Digit3.Value, !immediate);
+
+        if (!wasUnlocked && IsUnlocked)
+        {
+            if (audioSource != null && unlockSound != null)
+            {
+                audioSource.PlayOneShot(unlockSound);
+            }
+
+            incorrectCombinationFeedbackUntil = 0f;
+            ExitInspectionInteraction();
+            Log("Briefcase unlocked by the server.");
+        }
     }
 
     private LockDialController FindDial(string dialName)
