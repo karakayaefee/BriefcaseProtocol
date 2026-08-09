@@ -10,7 +10,10 @@ public static class CharacterPrefabBuilder
     private const string MaterialFolder = "Assets/Materials";
     private const string PrefabPath = PrefabFolder + "/Character.prefab";
     private const string MaterialPath = MaterialFolder + "/CharacterCapsule.mat";
-    private const string CharacterModelPath = "Assets/Characters/Swat/Model/Swat.fbx";
+    private const string CharacterModelPath =
+        "Assets/TripoModels/purple_hoodie_character_3d_model/purple_hoodie_character_3d_model.fbx";
+    private const string CharacterModelName = "Purple Hoodie Character";
+    private const float CharacterStandingEyeHeight = 0.784056f;
     private const string LobbyScenePath = "Assets/Scenes/Lobby.unity";
 
     [MenuItem("Tools/Briefcase Protocol/Rebuild Character Prefab and Lobby")]
@@ -59,13 +62,13 @@ public static class CharacterPrefabBuilder
             if (characterModelPrefab != null)
             {
                 GameObject characterModel = (GameObject)PrefabUtility.InstantiatePrefab(characterModelPrefab);
-                characterModel.name = "Swat";
+                characterModel.name = CharacterModelName;
                 characterModel.transform.SetParent(modelRoot.transform, false);
             }
 
             GameObject cameraPivot = new GameObject("CameraPivot");
             cameraPivot.transform.SetParent(root.transform, false);
-            cameraPivot.transform.localPosition = new Vector3(0f, 1.65f, 0f);
+            cameraPivot.transform.localPosition = new Vector3(0f, CharacterStandingEyeHeight, 0f);
 
             GameObject cameraObject = new GameObject("PlayerCamera");
             cameraObject.tag = "MainCamera";
@@ -180,7 +183,9 @@ public static class CharacterPrefabBuilder
 
         Camera prefabCamera = prefab.GetComponentInChildren<Camera>(true);
         if (prefabCamera == null || prefabCamera.transform.parent == null ||
-            !Mathf.Approximately(prefabCamera.transform.parent.localPosition.y, 1.65f))
+            !Mathf.Approximately(
+                prefabCamera.transform.parent.localPosition.y,
+                CharacterStandingEyeHeight))
         {
             throw new InvalidOperationException("Character eye-level camera validation failed.");
         }

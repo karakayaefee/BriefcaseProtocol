@@ -20,8 +20,8 @@ public sealed class FirstPersonCharacterController : NetworkBehaviour
     [Header("Stance")]
     [SerializeField, Min(0.1f)] private float standingHeight = 1.8f;
     [SerializeField, Min(0.1f)] private float crouchingHeight = 1.1f;
-    [SerializeField, Min(0f)] private float standingEyeHeight = 1.65f;
-    [SerializeField, Min(0f)] private float crouchingEyeHeight = 0.95f;
+    [SerializeField, Min(0f)] private float standingEyeHeight = 0.784056f;
+    [SerializeField, Min(0f)] private float crouchingEyeHeight = 0.451426f;
     [SerializeField, Min(0.1f)] private float stanceChangeSpeed = 5f;
 
     [Header("Look")]
