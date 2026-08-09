@@ -1,7 +1,8 @@
 {
   "dependencies": {
-    "com.playeveryware.eos": "https://github.com/EOS-Contrib/eos_plugin_for_unity_upm.git#v6.1.1",
     "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main",
+    "com.playeveryware.eos": "https://github.com/EOS-Contrib/eos_plugin_for_unity_upm.git#v6.1.1",
+    "com.tripo3d.unitybridge": "file:C:/Users/husey/OneDrive/Masaüstü/Tripo3d_Unity_Bridge",
     "com.unity.ai.assistant": "2.16.0-pre.1",
     "com.unity.ai.inference": "2.6.1",
     "com.unity.ai.navigation": "2.0.13",

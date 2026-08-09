@@ -27,6 +27,14 @@
       },
       "hash": "6d0020bff46284e7e86c4297f40565529818e971"
     },
+    "com.tripo3d.unitybridge": {
+      "version": "file:C:/Users/husey/OneDrive/Masaüstü/Tripo3d_Unity_Bridge",
+      "depth": 0,
+      "source": "local",
+      "dependencies": {
+        "com.unity.modules.jsonserialize": "1.0.0"
+      }
+    },
     "com.unity.2d.sprite": {
       "version": "1.0.0",
       "depth": 1,
